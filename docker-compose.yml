@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # Backend API Server
+  backend:
+    container_name: video-retrieval-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - MILVUS_HOST=${MILVUS_HOST:-0.tcp.ap.ngrok.io}
+      - MILVUS_PORT=${MILVUS_PORT:-13216}
+      - ELASTICSEARCH_HOST=${ELASTICSEARCH_HOST:-0.tcp.ap.ngrok.io}
+      - ELASTICSEARCH_PORT=${ELASTICSEARCH_PORT:-9200}
+      - DEVICE=${DEVICE:-cpu}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_RELOAD=false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx Reverse Proxy (optional)
+  nginx:
+    container_name: nginx-proxy
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+    profiles:
+      - production
+
+  # Redis Cache (optional)
+  redis:
+    container_name: redis-cache
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  redis_data: 

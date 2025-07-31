@@ -1,0 +1,13 @@
+# --- Core FastAPI & Web Server ---
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic
+pydantic-settings
+
+
+# --- Development & Logging (Tùy chọn, có thể bỏ trong production image) ---
+pytest==7.4.3
+black==23.11.0
+isort==5.12.0
+flake8==5.0.4
+rich==13.7.0
