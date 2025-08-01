@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # Backend API Server
@@ -56,4 +56,4 @@ services:
       - production
 
 volumes:
-  redis_data: 
+  redis_data:

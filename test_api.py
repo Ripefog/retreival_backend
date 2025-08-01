@@ -142,6 +142,201 @@ def test_compare_search():
         print(f"❌ Compare search error: {e}")
         return False
 
+# ==============================================================================
+# UI Input API Tests - Các test mới cho UI input APIs
+# ==============================================================================
+
+def test_ui_input():
+    """Test UI input processing endpoint"""
+    print("\n🔍 Testing UI input processing...")
+    
+    # Test data
+    input_data = {
+        "input_text": "person walking in red shirt",
+        "input_type": "search",
+        "user_id": "user123",
+        "session_id": "session456"
+    }
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/ui/input",
+            json=input_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ UI input processing completed")
+            print(f"   Success: {data.get('success')}")
+            print(f"   Processed text: {data.get('processed_text')}")
+            print(f"   Suggestions: {len(data.get('suggestions', []))} items")
+            return True
+        else:
+            print(f"❌ UI input processing failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ UI input processing error: {e}")
+        return False
+
+def test_text_processing():
+    """Test text processing endpoint"""
+    print("\n🔍 Testing text processing...")
+    
+    # Test data
+    text_data = {
+        "text": "Person walking in red shirt on sunny day",
+        "processing_type": "extract",
+        "language": "en"
+    }
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/ui/text/process",
+            json=text_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ Text processing completed")
+            print(f"   Original: {data.get('original_text')}")
+            print(f"   Processed: {data.get('processed_text')}")
+            print(f"   Confidence: {data.get('confidence'):.2f}")
+            return True
+        else:
+            print(f"❌ Text processing failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Text processing error: {e}")
+        return False
+
+def test_query_suggestions():
+    """Test query suggestions endpoint"""
+    print("\n🔍 Testing query suggestions...")
+    
+    # Test data
+    suggestion_data = {
+        "partial_query": "person",
+        "context": ["video", "walking"],
+        "max_suggestions": 3
+    }
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/ui/query/suggest",
+            json=suggestion_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ Query suggestions completed")
+            print(f"   Partial query: {data.get('partial_query')}")
+            print(f"   Suggestions: {data.get('suggestions')}")
+            print(f"   Total suggestions: {data.get('total_suggestions')}")
+            return True
+        else:
+            print(f"❌ Query suggestions failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Query suggestions error: {e}")
+        return False
+
+def test_filter_input():
+    """Test filter input processing endpoint"""
+    print("\n🔍 Testing filter input processing...")
+    
+    # Test data
+    filter_data = {
+        "filter_type": "object",
+        "filter_values": ["person", "car", "building"],
+        "operator": "AND",
+        "priority": 1
+    }
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/ui/filter/input",
+            json=filter_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ Filter input processing completed")
+            print(f"   Filter type: {data.get('filter_type')}")
+            print(f"   Processed filters: {data.get('processed_filters')}")
+            print(f"   Validation status: {data.get('validation_status')}")
+            return True
+        else:
+            print(f"❌ Filter input processing failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Filter input processing error: {e}")
+        return False
+
+def test_batch_input():
+    """Test batch input processing endpoint"""
+    print("\n🔍 Testing batch input processing...")
+    
+    # Test data
+    batch_data = {
+        "inputs": [
+            "person walking",
+            "red car driving",
+            "building with windows"
+        ],
+        "batch_type": "search",
+        "priority": "normal"
+    }
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/ui/batch/input",
+            json=batch_data,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ Batch input processing completed")
+            print(f"   Total inputs: {data.get('total_inputs')}")
+            print(f"   Processed: {data.get('processed_inputs')}")
+            print(f"   Failed: {data.get('failed_inputs')}")
+            print(f"   Processing time: {data.get('processing_time'):.3f}s")
+            return True
+        else:
+            print(f"❌ Batch input processing failed: {response.status_code}")
+            print(f"   Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Batch input processing error: {e}")
+        return False
+
+def test_input_types():
+    """Test input types endpoint"""
+    print("\n🔍 Testing input types...")
+    
+    try:
+        response = requests.get(f"{BASE_URL}/ui/input/types")
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ Input types retrieved")
+            print(f"   Available input types: {len(data.get('input_types', []))}")
+            print(f"   Processing types: {data.get('processing_types')}")
+            return True
+        else:
+            print(f"❌ Input types failed: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Input types error: {e}")
+        return False
+
 def main():
     """Run all tests"""
     print("🚀 Starting Video Retrieval Backend API Tests")
@@ -157,7 +352,14 @@ def main():
         test_search_modes,
         test_collections,
         test_search,
-        test_compare_search
+        test_compare_search,
+        # UI Input API tests
+        test_ui_input,
+        test_text_processing,
+        test_query_suggestions,
+        test_filter_input,
+        test_batch_input,
+        test_input_types
     ]
     
     passed = 0

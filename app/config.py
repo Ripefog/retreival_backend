@@ -8,14 +8,14 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     # Milvus Configuration
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
-    MILVUS_PORT: int = 10094
+    MILVUS_PORT: int = 17897
     MILVUS_ALIAS: str = "default"
     MILVUS_USER: Optional[str] = None
     MILVUS_PASSWORD: Optional[str] = None
     
     # Elasticsearch Configuration
     ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 19955
+    ELASTICSEARCH_PORT: int = 19043
     ELASTICSEARCH_USERNAME: Optional[str] = None
     ELASTICSEARCH_PASSWORD: Optional[str] = None
     ELASTICSEARCH_USE_SSL: bool = False
@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     OCR_INDEX: str = 'ocr'
     ASR_INDEX: str = 'video_transcripts'
     
+    CLIP_MODEL_PATH: str = "/app/models/clip_model.bin"
+    BEIT3_MODEL_PATH: str = "/app/models/beit3_base_patch16_384_coco_retrieval.pth"
+    BEIT3_SPM_PATH: str = "/app/models/beit3.spm"
     # Model Configuration
     DEVICE: str = "cuda"  # or "cpu"
     
