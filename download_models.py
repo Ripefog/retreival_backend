@@ -6,7 +6,7 @@ from tqdm import tqdm
 MODEL_URLS = {
     "clip/open_clip_pytorch_model.bin": "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin",
     "beit3/beit3.spm": "https://github.com/addf400/files/releases/download/beit3/beit3.spm",
-    "beit3/beit3_base_patch16_384_coco_retrieval.pth": "https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth",
+    "beit3/beit3_base_patch16_384_coco_retrieval.pth": "https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth",  # Back to Base
     "co_detr/co_dino_5scale_swin_large_16e_o365tococo.pth": "https://github.com/Sense-X/Co-DETR/releases/download/v0.1.0/co_dino_5scale_swin_large_16e_o365tococo.pth" # Thay bằng URL checkpoint của bạn nếu khác
 }
 

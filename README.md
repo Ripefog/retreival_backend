@@ -118,8 +118,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ### Docker (tùy chọn)
 
 ```bash
-docker build -t video-retrieval-backend .
-docker run (--gpus all) -p 8000:8000 video-retrieval-backend
+docker build -t video-retrieval-app:original-env .
+docker run (--gpus all) -p 8000:8000 video-retrieval-app:original-env
 ```
 
 ## 📡 API Endpoints

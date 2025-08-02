@@ -1,167 +1,130 @@
-# app/main.py
+# --- START OF FILE app/main.py ---
 
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import uvicorn
-from contextlib import asynccontextmanager
+import os
+import shutil
+import tempfile
 import logging
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import init_database, close_database
 from .retrieval_engine import HybridRetriever
-from .models import SearchRequest, SearchResponse
+from .models import (
+    SearchRequest, 
+    SearchResponse, 
+    ImageObjectsResponse, 
+    search_examples, 
+    compare_examples
+)
 
-# Cấu hình logging
-logging.basicConfig(level=logging.INFO)
+# Cấu hình logging cơ bản cho ứng dụng
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# --- [MỚI] ĐỊNH NGHĨA CÁC VÍ DỤ ĐẦU VÀO CHO API ---
-search_examples = {
-    "simple_hybrid": {
-        "summary": "1. Tìm kiếm Hybrid đơn giản",
-        "description": "Một tìm kiếm cơ bản cho **'một người ngồi ở bàn'** sử dụng chế độ `hybrid` mặc định. Đây là trường hợp sử dụng phổ biến nhất.",
-        "value": {
-            "text_query": "a person sitting at a desk",
-            "mode": "hybrid",
-            "top_k": 5
-        }
-    },
-    "complex_filters": {
-        "summary": "2. Tìm kiếm với bộ lọc Object & Color",
-        "description": "Tìm **'người đàn ông mặc đồ màu xanh'**. Hệ thống sẽ ưu tiên (tăng điểm) cho các kết quả có chứa đối tượng 'person', 'man' và màu 'blue'.",
-        "value": {
-            "text_query": "a man wearing something blue",
-            "mode": "hybrid",
-            "object_filters": ["person", "man"],
-            "color_filters": ["blue"],
-            "top_k": 5
-        }
-    },
-    "full_filters": {
-        "summary": "3. Tìm kiếm phức hợp với tất cả bộ lọc",
-        "description": "Một truy vấn phức hợp để tìm **'một người dẫn chương trình trên sân khấu'**, kết hợp bộ lọc đối tượng, màu sắc, văn bản trong ảnh (OCR) và lời thoại (ASR).",
-        "value": {
-            "text_query": "a presenter on stage",
-            "mode": "hybrid",
-            "object_filters": ["person"],
-            "color_filters": ["red"],
-            "ocr_query": "VIỆT NAM",
-            "asr_query": "kinh tế",
-            "top_k": 5
-        }
-    },
-    "vietnamese_query": {
-        "summary": "4. Tìm kiếm bằng Tiếng Việt",
-        "description": "Ví dụ về một truy vấn tìm kiếm bằng Tiếng Việt: **'nữ biên tập viên mặc áo hồng'**.",
-        "value": {
-            "text_query": "nữ biên tập viên mặc áo hồng đang dẫn chương trình thời sự",
-            "mode": "hybrid",
-            "color_filters": ["pink", "red"],
-            "top_k": 5
-        }
-    },
-    "clip_only_mode": {
-        "summary": "5. Tìm kiếm chỉ bằng chế độ CLIP",
-        "description": "Thực hiện tìm kiếm chỉ bằng mô hình CLIP, bỏ qua bước tinh chỉnh của BEiT-3. Thường nhanh hơn nhưng có thể kém chính xác hơn `hybrid`.",
-        "value": {
-            "text_query": "a news anchor in a studio",
-            "mode": "clip",
-            "top_k": 5
-        }
-    }
-}
-
-
-# Global variables
+# Khai báo biến global cho retriever engine
+from typing import Optional
 retriever: Optional[HybridRetriever] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    """
+    Quản lý vòng đời của ứng dụng: khởi tạo tài nguyên khi bắt đầu và giải phóng khi kết thúc.
+    """
     global retriever
-    logger.info("Initializing application startup...")
+    logger.info("--- Application Startup ---")
+    
+    # 1. Kết nối cơ sở dữ liệu
     await init_database()
     
-    logger.info("Initializing Hybrid Retriever...")
+    # 2. Khởi tạo và tải các mô hình AI
     retriever = HybridRetriever()
     await retriever.initialize()
-    logger.info("✅ Backend startup complete!")
     
-    yield
+    logger.info("✅ Application startup complete. Ready to accept requests.")
     
-    # Shutdown
-    logger.info("Shutting down backend...")
+    yield  # Ứng dụng chạy ở đây
+    
+    # --- Application Shutdown ---
+    logger.info("--- Application Shutdown ---")
     await close_database()
-    logger.info("✅ Backend shutdown complete.")
+    logger.info("✅ Application shutdown complete.")
 
-
-# Tạo FastAPI app
+# Khởi tạo ứng dụng FastAPI với lifespan
 app = FastAPI(
-    title="Video Retrieval Backend API",
-    description="API cho hệ thống tìm kiếm video đa phương thức. Sử dụng các mô hình AI tiên tiến như CLIP và BEiT-3 để tìm kiếm theo ngữ nghĩa, đối tượng, màu sắc, OCR và ASR.",
-    version="1.0.0",
-    lifespan=lifespan
+    title="Hybrid Video Retrieval API",
+    description="Một API mạnh mẽ để tìm kiếm video đa phương thức, sử dụng kết hợp các mô hình AI (CLIP, BEiT-3, Co-DETR) và cơ sở dữ liệu vector/text (Milvus, Elasticsearch).",
+    version="1.1.0",
+    lifespan=lifespan,
+    contact={
+        "name": "AI Team",
+        "url": "https://example.com",
+        "email": "ai-team@example.com",
+    },
 )
 
-# CORS middleware
+# Cấu hình CORS để cho phép truy cập từ các domain khác (ví dụ: frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Trong production, nên giới hạn lại: ["http://localhost:3000"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
+# === API Endpoints ===
+
+@app.get("/", tags=["General"])
 async def root():
-    return {"message": "Video Retrieval Backend API is running. Visit /docs for documentation."}
+    """Endpoint gốc để kiểm tra API có đang hoạt động hay không."""
+    return {"message": "Welcome to the Hybrid Video Retrieval API. Visit /docs for interactive documentation."}
 
-@app.get("/health")
+@app.get("/health", tags=["General"])
 async def health_check():
-    """Kiểm tra 'sức khỏe' của hệ thống, bao gồm kết nối đến Milvus và Elasticsearch."""
-    try:
-        if retriever is None:
-            raise HTTPException(status_code=503, detail="Retriever not initialized")
-        
-        milvus_status = retriever.check_milvus_connection()
-        es_status = retriever.check_elasticsearch_connection()
-        
-        if milvus_status.get('status') != 'connected' or es_status.get('status') != 'connected':
-             raise HTTPException(status_code=503, detail="One or more database connections are down.")
+    """Kiểm tra 'sức khỏe' toàn diện của hệ thống, bao gồm các kết nối DB và trạng thái của retriever."""
+    if not retriever:
+        raise HTTPException(status_code=503, detail="Retriever service is not available.")
+    
+    milvus_status = retriever.check_milvus_connection()
+    es_status = retriever.check_elasticsearch_connection()
+    
+    is_healthy = (
+        milvus_status.get("status") == "connected" and
+        es_status.get("status") == "connected"
+    )
+    
+    if not is_healthy:
+        raise HTTPException(
+            status_code=503, 
+            detail={
+                "status": "unhealthy",
+                "milvus": milvus_status,
+                "elasticsearch": es_status,
+            }
+        )
 
-        return {
-            "status": "healthy",
-            "milvus": milvus_status,
-            "elasticsearch": es_status,
-            "retriever": "initialized"
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
+    return {
+        "status": "healthy",
+        "milvus": milvus_status,
+        "elasticsearch": es_status,
+    }
 
 @app.post("/search", response_model=SearchResponse, tags=["Search"])
-async def search_videos(
-    request: SearchRequest = Body(..., examples=search_examples)
-):
+async def search_videos(request: SearchRequest = Body(..., examples=search_examples)):
     """
-    **Endpoint chính để tìm kiếm video.**
+    **Endpoint chính để thực hiện tìm kiếm video đa phương thức.**
 
-    Cho phép tìm kiếm theo nhiều tiêu chí:
-    - `text_query`: Câu truy vấn ngữ nghĩa (bắt buộc).
-    - `mode`: Chế độ tìm kiếm ('hybrid', 'clip', 'beit3').
-    - `object_filters`: Lọc và ưu tiên các đối tượng có trong ảnh.
-    - `color_filters`: Lọc và ưu tiên các màu sắc có trong ảnh.
-    - `ocr_query`: Lọc theo văn bản xuất hiện trong ảnh.
-    - `asr_query`: Lọc theo lời thoại trong video.
+    Cung cấp một truy vấn văn bản và các bộ lọc tùy chọn để tìm các keyframe video phù hợp.
     """
+    if not retriever: raise HTTPException(status_code=503, detail="Retriever not initialized")
     try:
-        if retriever is None:
-            raise HTTPException(status_code=503, detail="Retriever not initialized")
-        
-        logger.info(f"Processing search request: {request.text_query}")
-        
+        logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}'")
         results = retriever.search(
             text_query=request.text_query,
             mode=request.mode.value,
@@ -169,91 +132,63 @@ async def search_videos(
             color_filters=request.color_filters,
             ocr_query=request.ocr_query,
             asr_query=request.asr_query,
-            top_k=request.top_k
+            top_k=request.top_k,
         )
-        
-        return SearchResponse(
-            query=request.text_query,
-            mode=request.mode,
-            results=results,
-            total_results=len(results)
-        )
-        
+        return SearchResponse(query=request.text_query, mode=request.mode, results=results, total_results=len(results))
     except Exception as e:
         logger.error(f"Search failed for query '{request.text_query}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An internal error occurred during search.")
+        raise HTTPException(status_code=500, detail="An internal error occurred during the search process.")
 
 @app.post("/search/compare", tags=["Search"])
-async def compare_search_modes(
-    request: SearchRequest = Body(..., examples=search_examples)
-):
+async def compare_search_modes(request: SearchRequest = Body(..., examples=compare_examples)):
     """
-    **So sánh kết quả tìm kiếm giữa các chế độ (`hybrid`, `clip`, `beit3`).**
-
-    Endpoint này hữu ích để đánh giá hiệu quả của các mô hình khác nhau trên cùng một truy vấn.
+    **So sánh kết quả giữa các chế độ tìm kiếm (`hybrid`, `clip`, `beit3`)** trên cùng một truy vấn.
+    
+    Rất hữu ích cho việc đánh giá và gỡ lỗi.
     """
-    try:
-        if retriever is None:
-            raise HTTPException(status_code=503, detail="Retriever not initialized")
-        
-        comparison_results = {}
-        modes_to_compare = ["hybrid", "clip", "beit3"]
-        
-        for mode in modes_to_compare:
-            mode_results = retriever.search(
-                text_query=request.text_query,
-                mode=mode,
-                object_filters=request.object_filters,
-                color_filters=request.color_filters,
-                ocr_query=request.ocr_query,
-                asr_query=request.asr_query,
-                top_k=request.top_k
-            )
-            comparison_results[mode] = {
-                "results": mode_results,
-                "total_results": len(mode_results)
-            }
-        
-        return {
-            "query": request.text_query,
-            "comparison": comparison_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Comparison search failed for query '{request.text_query}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An internal error occurred during comparison search.")
+    if not retriever: raise HTTPException(status_code=503, detail="Retriever not initialized")
+    comparison_results = {}
+    modes_to_compare = ["hybrid", "clip", "beit3"]
+    for mode in modes_to_compare:
+        results = retriever.search(
+            text_query=request.text_query, mode=mode, object_filters=request.object_filters,
+            color_filters=request.color_filters, ocr_query=request.ocr_query,
+            asr_query=request.asr_query, top_k=request.top_k
+        )
+        comparison_results[mode] = {"results": results, "total_results": len(results)}
+    return {"query": request.text_query, "comparison": comparison_results}
 
-@app.get("/search/modes", tags=["Information"])
-async def get_search_modes():
-    """Lấy danh sách các chế độ tìm kiếm có sẵn và mô tả của chúng."""
-    return {
-        "modes": ["hybrid", "clip", "beit3"],
-        "descriptions": {
-            "hybrid": "Đề xuất: Kết hợp CLIP (lọc rộng) và BEiT-3 (tinh chỉnh) cho kết quả cân bằng và chính xác nhất.",
-            "clip": "Chỉ sử dụng mô hình CLIP. Nhanh và hiệu quả cho các truy vấn ngữ nghĩa chung.",
-            "beit3": "Chỉ sử dụng mô hình BEiT-3. Tốt cho các truy vấn chi tiết và phức tạp nhưng có thể chậm hơn."
-        }
-    }
+@app.post("/process/image-objects", response_model=ImageObjectsResponse, tags=["Processing"])
+async def process_image_for_objects(file: UploadFile = File(..., description="File ảnh để phân tích.")):
+    """
+    **Tải lên một ảnh và nhận diện các đối tượng/màu sắc có trong đó.**
 
-@app.get("/collections", tags=["Information"])
-async def get_collections_info():
-    """Lấy thông tin về các collection đã được tải trong Milvus (số lượng, schema)."""
+    Sử dụng mô hình Co-DETR. Endpoint này mô phỏng một bước trong pipeline đánh chỉ mục dữ liệu.
+    """
+    if not retriever or not retriever.object_detector:
+        raise HTTPException(status_code=503, detail="Object Detector is not available.")
+    
+    # Lưu file tải lên vào một file tạm thời vì Co-DETR yêu cầu đường dẫn file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
     try:
-        if retriever is None:
-            raise HTTPException(status_code=503, detail="Retriever not initialized")
-        
-        collections_info = retriever.get_collections_info()
-        return {"collections": collections_info}
-        
-    except Exception as e:
-        logger.error(f"Failed to get collections info: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get collections info.")
+        logger.info(f"Processing image for objects: {file.filename}")
+        objects, colors = retriever.detect_objects_in_image(tmp_path)
+        return ImageObjectsResponse(objects=objects, colors=colors)
+    finally:
+        # Đảm bảo dọn dẹp file tạm sau khi xử lý xong
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 if __name__ == "__main__":
+    # Chạy server Uvicorn khi thực thi file này trực tiếp
+    # Hữu ích cho việc phát triển và gỡ lỗi cục bộ
     uvicorn.run(
-        "app.main:app",  # Sửa lại đường dẫn để uvicorn có thể tìm thấy app
+        "app.main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.API_RELOAD,
         log_level="info"
     )
+# --- END OF FILE app/main.py ---
