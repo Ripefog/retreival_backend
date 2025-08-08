@@ -31,7 +31,7 @@ open-clip-torch
 scikit-learn
 opencv-python-headless # Dùng bản headless vì không cần GUI
 pillow
-
+colormath
 # Libraries from notebook (ít quan trọng hơn)
 moviepy
 nbimporter

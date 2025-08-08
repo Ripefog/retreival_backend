@@ -25,7 +25,9 @@ from mmcv import Config
 from mmdet.apis import init_detector, inference_detector
 from sklearn.cluster import KMeans
 from sklearn.neighbors import KDTree
-
+from colormath.color_objects import sRGBColor, LabColor
+from colormath.color_conversions import convert_color
+from colormath.color_diff import delta_e_cie2000
 # Import từ các module của ứng dụng
 from .config import settings
 from .database import db_manager
@@ -66,32 +68,87 @@ class ObjectColorDetector:
         self.color_tree = KDTree(np.array(list(self.basic_colors.values())))
         logger.info("✅ Co-DETR model loaded.")
 
-    def detect(self, image_path: str) -> Tuple[List[str], List[str]]:
+    def _convert_basic_colors_to_lab(self) -> dict:
+        """Chuyển basic_colors sang CIELAB để so sánh nhanh hơn."""
+        lab_dict = {}
+        for name, rgb in self.basic_colors.items():
+            rgb_obj = sRGBColor(*rgb, is_upscaled=True)
+            lab_obj = convert_color(rgb_obj, LabColor)
+            lab_dict[name] = lab_obj
+        return lab_dict
+
+    def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+        """Convert RGB tuple to CIELAB tuple."""
+        rgb_obj = sRGBColor(*rgb, is_upscaled=True)
+        lab_obj = convert_color(rgb_obj, LabColor)
+        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
+
+    def _get_closest_color_name(self, rgb: Tuple[int, int, int]) -> str:
+        """Tìm tên màu gần nhất theo thị giác (CIELAB + Delta E CIEDE2000)."""
+        rgb_color = sRGBColor(*rgb, is_upscaled=True)
+        lab_color = convert_color(rgb_color, LabColor)
+
+        min_delta = float('inf')
+        closest_name = None
+
+        for name, lab_ref in self.basic_colors_lab.items():
+            delta = delta_e_cie2000(lab_color, lab_ref)
+            if delta < min_delta:
+                min_delta = delta
+                closest_name = name
+        return closest_name
+
+    def detect(self, image_path: str) -> Tuple[
+        List[Tuple[float, float, float]],
+        Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]
+    ]:
         try:
             result = inference_detector(self.model, image_path)
-            if isinstance(result, tuple): result = result[0]
-            
-            frame_cv = cv2.imread(image_path)
-            if frame_cv is None: return [], []
+            if isinstance(result, tuple):
+                result = result[0]
 
-            detected_objects, detected_colors = set(), set()
+            img = cv2.imread(image_path)
+            if img is None:
+                raise ValueError("Không đọc được ảnh.")
+
+            # --- MÀU CHỦ ĐẠO TOÀN ẢNH ---
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            flat_pixels = img_rgb.reshape(-1, 3)
+            kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(flat_pixels)
+            dominant_rgb = kmeans.cluster_centers_.astype(int)
+
+            dominant_colors_lab = [self._rgb_to_lab(tuple(color)) for color in dominant_rgb]
+
+            # --- MÀU CỦA TỪNG OBJECT ---
+            object_colors_lab = {}
+
             for class_id, bboxes in enumerate(result):
-                if class_id >= len(self.model.CLASSES): continue
+                if class_id >= len(self.model.CLASSES):
+                    continue
+                class_name = self.model.CLASSES[class_id]
                 for bbox in bboxes:
-                    if bbox[4] < 0.5: continue  # Lọc bỏ các phát hiện có độ tin cậy thấp
-                    detected_objects.add(self.model.CLASSES[class_id])
+                    if bbox[4] < 0.5:
+                        continue
                     x1, y1, x2, y2 = map(int, bbox[:4])
-                    crop = frame_cv[y1:y2, x1:x2]
-                    if crop.size == 0: continue
-                    # Tìm màu chủ đạo
+                    crop = img[y1:y2, x1:x2]
+                    if crop.size == 0:
+                        continue
+
                     crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).reshape(-1, 3)
-                    kmeans = KMeans(n_clusters=1, n_init='auto', random_state=0).fit(crop_rgb)
-                    _, idx = self.color_tree.query([kmeans.cluster_centers_[0]], k=1)
-                    detected_colors.add(self.color_names[idx[0][0]])
-            return list(detected_objects), list(detected_colors)
+                    kmeans_obj = KMeans(n_clusters=1, random_state=0, n_init=10).fit(crop_rgb)
+                    dom_rgb = kmeans_obj.cluster_centers_[0].astype(int)
+                    lab_color = self._rgb_to_lab(tuple(dom_rgb))
+
+                    if class_name not in object_colors_lab:
+                        object_colors_lab[class_name] = []
+                    # Thêm vị trí bounding box vào kết quả
+                    object_colors_lab[class_name].append((lab_color, (x1, y1, x2, y2)))
+
+            return dominant_colors_lab, object_colors_lab
+
         except Exception as e:
-            logger.error(f"Object/color detection failed for {image_path}: {e}", exc_info=True)
-            return [], []
+            print(f"Error during detection: {e}")
+            return [], {}
 
 class HybridRetriever:
     """Công cụ truy xuất lai, kết hợp các model AI và tìm kiếm đa phương thức."""
@@ -150,7 +207,34 @@ class HybridRetriever:
             text_padding_mask_tensor = torch.tensor(text_padding_mask, dtype=torch.long).unsqueeze(0).to(self.device)
             _, text_emb = self.beit3_model(text_description=text_ids_tensor, text_padding_mask=text_padding_mask_tensor, only_infer=True)
             return text_emb.cpu().numpy()[0]
-            
+
+    def _compare_color(self, color1, color2):
+        """So sánh hai màu sắc CIELAB bằng CIEDE2000."""
+        color1_lab = LabColor(*color1)  # color1 là tuple (L, A, B)
+        color2_lab = LabColor(*color2)  # color2 là tuple (L, A, B)
+        delta_e = delta_e_cie2000(color1_lab, color2_lab)
+        return delta_e
+
+    def _compare_bbox(self, bbox1, bbox2):
+        """So sánh hai bounding box bằng IoU (Intersection over Union)."""
+        x1_min, y1_min, x1_max, y1_max = bbox1
+        x2_min, y2_min, x2_max, y2_max = bbox2
+
+        # Tính diện tích giao nhau
+        x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
+        y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
+
+        intersection = x_overlap * y_overlap
+
+        # Tính diện tích của mỗi bbox
+        area1 = (x1_max - x1_min) * (y1_max - y1_min)
+        area2 = (x2_max - x2_min) * (y2_max - y2_min)
+
+        # Tính IoU
+        union = area1 + area2 - intersection
+        iou = intersection / union if union > 0 else 0
+        return iou
+
     # --- LOGIC TÌM KIẾM CHÍNH ---
     def search(self, text_query: str, mode: str, object_filters: Optional[List[str]], color_filters: Optional[List[str]],
                ocr_query: Optional[str], asr_query: Optional[str], top_k: int) -> List[Dict[str, Any]]:
@@ -189,7 +273,6 @@ class HybridRetriever:
         # GĐ5: XẾP HẠNG VÀ TRẢ VỀ
         sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
         final_results = self._format_results(sorted_results[:top_k])
-        
         search_time = time.time() - start_time
         logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
         return final_results
@@ -239,20 +322,170 @@ class HybridRetriever:
                     info['beit3_score'] = beit3_score; info['reasons'].append(f"BEIT-3 refine ({beit3_score:.3f})")
                 else: info['score'] *= 0.8; info['reasons'].append("BEIT-3 vector missing")
         except Exception as e: logger.error(f"BEIT-3 reranking failed: {e}")
-    
-    def _apply_object_color_filters(self, candidate_info: Dict, object_filters: Optional[List], color_filters: Optional[List], top_k: int):
+    # color_filters: List[Tuple[float, float, float]],
+    # object_filters: Dict[str, List[Tuple[float, float, float, Tuple[int, int, int, int]]]]
+    # def _apply_object_color_filters(self, candidate_info: Dict, object_filters: Optional[List], color_filters: Optional[List], top_k: int):
+    #     if object_filters:
+    #         for obj in object_filters:
+    #             obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, self.get_clip_text_embedding(obj).tolist(), top_k * 10)
+    #             for hit in obj_hits:
+    #                 kf_id = '_'.join(hit['id'].split('_')[:-2])
+    #                 if kf_id in candidate_info: candidate_info[kf_id]['score'] += 0.1; candidate_info[kf_id]['reasons'].append(f"Object match: '{obj}'")
+    #     if color_filters:
+    #         for color in color_filters:
+    #             color_hits = self._search_milvus(settings.COLOR_COLLECTION, self.get_clip_text_embedding(color).tolist(), top_k * 10)
+    #             for hit in color_hits:
+    #                 kf_id = '_'.join(hit['id'].split('_')[:-2])
+    #                 if kf_id in candidate_info: candidate_info[kf_id]['score'] += 0.05; candidate_info[kf_id]['reasons'].append(f"Color match: '{color}'")
+
+    # Giả định: bạn đã có 2 hàm này
+    # compare_color((L,A,B), (L,A,B)) -> float (DeltaE, càng nhỏ càng giống)
+    # compare_bbox((xmin,ymin,xmax,ymax), (xmin,ymin,xmax,ymax)) -> float (IoU 0..1)
+
+    def _safe_get_label(self, entity: Dict[str, Any]) -> Optional[str]:
+        """
+        Một số kết quả Milvus có thể bọc 'entity' 2 lớp. Hàm này tìm 'label' an toàn.
+        """
+        if not entity:
+            return None
+        # Trường hợp phổ biến: hit['entity']['label']
+        if isinstance(entity, dict) and 'label' in entity and entity['label']:
+            return entity['label']
+        # Trường hợp bị lồng: hit['entity']['entity']['label']
+        inner = entity.get('entity') if isinstance(entity, dict) else None
+        if isinstance(inner, dict) and 'label' in inner and inner['label']:
+            return inner['label']
+        return None
+
+    def _parse_color_bbox_from_label(self, label: str) -> Tuple[
+        Optional[Tuple[float, float, float]], Optional[Tuple[int, int, int, int]]]:
+        """
+        Trả về (LAB | None, BBOX | None)
+        label: 'L,A,B' hoặc 'xmin,ymin,xmax,ymax' hoặc 'L,A,B,xmin,ymin,xmax,ymax'
+        """
+        if not label:
+            return None, None
+
+        parts = [p.strip() for p in label.split(",") if p.strip() != ""]
+        try:
+            nums = list(map(float, parts))
+        except ValueError:
+            return None, None
+
+        if len(nums) == 3:
+            # Chỉ LAB
+            return (nums[0], nums[1], nums[2]), None
+        elif len(nums) == 4:
+            # Chỉ bbox
+            return None, (int(nums[0]), int(nums[1]), int(nums[2]), int(nums[3]))
+        elif len(nums) >= 7:
+            # Cả LAB và bbox
+            return (nums[0], nums[1], nums[2]), (int(nums[3]), int(nums[4]), int(nums[5]), int(nums[6]))
+        else:
+            return None, None
+
+    def _normalize_object_filters(self,
+          object_filters: Dict[
+              str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]
+          ) -> Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]:
+        """
+        Nhận vào: {obj: [((L,A,B),(xmin,ymin,xmax,ymax)), ...]}
+        Trả ra:   y hệt, nhưng có validate cơ bản.
+        """
+        norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
+        for obj, items in object_filters.items():
+            fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
+            for it in items:
+                # kỳ vọng: it = ((L,A,B),(x1,y1,x2,y2))
+                if (not isinstance(it, (list, tuple))) or len(it) != 2:
+                    continue
+                lab, bbox = it[0], it[1]
+                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
+                    continue
+                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+                    continue
+                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
+                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                fixed.append((lab_t, bbox_t))
+            if fixed:
+                norm[obj] = fixed
+        return norm
+
+    def _apply_object_color_filters(
+            self,
+            candidate_info: Dict[str, Dict[str, Any]],
+            object_filters: Optional[Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]],
+            color_filters: Optional[List[Tuple[float, float, float]]],
+            top_k: int
+    ):
+        # ===== OBJECT FILTERS =====
         if object_filters:
-            for obj in object_filters:
-                obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, self.get_clip_text_embedding(obj).tolist(), top_k * 10)
+            norm_object_filters = self._normalize_object_filters(object_filters)
+
+            for obj, queries in norm_object_filters.items():
+                obj_vector = self.get_clip_text_embedding(obj).tolist()
+                obj_hits = self._search_milvus('object', obj_vector, top_k * 10)
+
                 for hit in obj_hits:
-                    kf_id = '_'.join(hit['id'].split('_')[:-2])
-                    if kf_id in candidate_info: candidate_info[kf_id]['score'] += 0.1; candidate_info[kf_id]['reasons'].append(f"Object match: '{obj}'")
+                    kf_id_parts = hit['id'].split('_')
+                    kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
+                    if kf_id not in candidate_info:
+                        continue
+
+                    label = self._safe_get_label(hit.get('entity', {}))
+                    stored_color, stored_bbox = self._parse_color_bbox_from_label(label) if label else (None, None)
+
+                    for query_color, query_bbox in queries:
+                        delta_e = None
+                        iou = None
+
+                        color_term = 0.0
+                        if query_color is not None and stored_color is not None:
+                            delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
+                            color_term = 0.1 * (1.0 / (1.0 + float(delta_e)))
+
+                        bbox_term = 0.0
+                        if query_bbox is not None and stored_bbox is not None:
+                            iou = self._compare_bbox(tuple(query_bbox), tuple(stored_bbox))  # 0..1
+                            bbox_term = 0.2 * float(iou)
+
+                        score_boost = color_term + bbox_term
+                        if score_boost > 0:
+                            candidate_info[kf_id]['score'] += score_boost
+                            candidate_info[kf_id]['reasons'].append(
+                                f"Object match: '{obj}'"
+                                + (f", ΔE={delta_e:.3f}" if delta_e is not None else "")
+                                + (f", IoU={iou:.3f}" if iou is not None else "")
+                            )
+
+        # ===== COLOR FILTERS (độc lập) =====
         if color_filters:
-            for color in color_filters:
-                color_hits = self._search_milvus(settings.COLOR_COLLECTION, self.get_clip_text_embedding(color).tolist(), top_k * 10)
+            for query_color in color_filters:
+                if query_color is None:
+                    continue
+
+                color_hits = self._search_milvus('color', list(query_color), top_k * 10)
+
                 for hit in color_hits:
-                    kf_id = '_'.join(hit['id'].split('_')[:-2])
-                    if kf_id in candidate_info: candidate_info[kf_id]['score'] += 0.05; candidate_info[kf_id]['reasons'].append(f"Color match: '{color}'")
+                    label = self._safe_get_label(hit.get('entity', {}))
+                    if not label:
+                        continue
+
+                    stored_color, _ = self._parse_color_bbox_from_label(label)
+                    if stored_color is None:
+                        continue
+
+                    delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
+
+                    kf_id_parts = hit['id'].split('_')
+                    kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
+
+                    if kf_id in candidate_info:
+                        score_boost = max(0.0, 0.1 * (1.0 / (1.0 + float(delta_e))))
+                        candidate_info[kf_id]['score'] += score_boost
+                        candidate_info[kf_id]['reasons'].append(
+                            f"Color match: ΔE={delta_e:.3f} với query {tuple(query_color)}"
+                        )
 
     def _apply_text_filters(self, candidate_info: Dict, ocr_kf_ids: Optional[Set[str]], asr_video_ids: Optional[Set[str]]) -> Dict:
         if not ocr_kf_ids and not asr_video_ids: return candidate_info

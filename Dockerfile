@@ -63,8 +63,10 @@ RUN git clone https://github.com/microsoft/unilm.git /app/unilm && \
 # ==============================================================================
 # STAGE 3: Cấu hình và chạy ứng dụng
 # ==============================================================================
+#FROM base AS runtime
+#WORKDIR /app
 COPY ./app /app/app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -5,9 +5,9 @@ import shutil
 import tempfile
 import logging
 from contextlib import asynccontextmanager
-
+from pydantic import ValidationError
 import uvicorn
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -20,7 +20,7 @@ from .models import (
     search_examples, 
     compare_examples
 )
-
+from typing import List, Dict, Any, Optional, Tuple, Set
 # Cấu hình logging cơ bản cho ứng dụng
 logging.basicConfig(
     level=logging.INFO,
@@ -124,6 +124,8 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
     """
     if not retriever: raise HTTPException(status_code=503, detail="Retriever not initialized")
     try:
+        logger.info(f"Raw request data: {request}")
+        logger.info(f"Request dict: {request.dict()}")
         logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}'")
         results = retriever.search(
             text_query=request.text_query,
@@ -138,6 +140,14 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
     except Exception as e:
         logger.error(f"Search failed for query '{request.text_query}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred during the search process.")
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error(f"Validation error: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()}
+    )
 
 @app.post("/search/compare", tags=["Search"])
 async def compare_search_modes(request: SearchRequest = Body(..., examples=compare_examples)):

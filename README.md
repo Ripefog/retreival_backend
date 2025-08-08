@@ -118,6 +118,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ### Docker (tùy chọn)
 
 ```bash
+# Build base image (lâu, chỉ 1 lần)
+docker build -t video-retrieval-backend-base --target base .
+
+# Build runtime image (nhanh, mỗi lần sửa code)
+docker build -t video-retrieval-backend --target runtime .
+
 docker build -t video-retrieval-backend .
 docker run (--gpus all) -p 8000:8000 video-retrieval-backend
 ```
