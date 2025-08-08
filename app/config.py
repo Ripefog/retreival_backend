@@ -18,14 +18,14 @@ class Settings(BaseSettings):
     # --- Milvus Configuration ---
     # Có thể ghi đè bằng cách set biến môi trường, ví dụ: export MILVUS_HOST="my-milvus.com"
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
-    MILVUS_PORT: int = 19220
+    MILVUS_PORT: int = 17254
     MILVUS_ALIAS: str = "default"
     MILVUS_USER: Optional[str] = None
     MILVUS_PASSWORD: Optional[str] = None
     
     # --- Elasticsearch/OpenSearch Configuration ---
     ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 16056
+    ELASTICSEARCH_PORT: int = 13080
     ELASTICSEARCH_USERNAME: Optional[str] = None
     ELASTICSEARCH_PASSWORD: Optional[str] = None
     ELASTICSEARCH_USE_SSL: bool = False
@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
-    OCR_INDEX: str = 'ocr'
-    ASR_INDEX: str = 'video_transcripts'
+    OCR_INDEX: str = 'ocr_v2'
+    ASR_INDEX: str = 'video_transcripts_v2'
     
     # --- Model Paths ---
     # Đường dẫn có thể là tuyệt đối (container) hoặc tương đối (local)

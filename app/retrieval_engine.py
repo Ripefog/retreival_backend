@@ -265,17 +265,108 @@ class HybridRetriever:
         return final_candidates
 
     def _search_es(self, ocr_query: Optional[str], asr_query: Optional[str]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
+        """Tìm kiếm trong Elasticsearch - Fixed version"""
         ocr_kf_ids, asr_video_ids = None, None
         es_client = self.db_manager.es_client
-        if not es_client: return ocr_kf_ids, asr_video_ids
+        if not es_client: 
+            return ocr_kf_ids, asr_video_ids
+        
+        # OCR Search
         if ocr_query:
             ocr_kf_ids = set()
-            res = es_client.search(index=settings.OCR_INDEX, body={"query": {"match": {"text": ocr_query}}, "_source": ["keyframe_id"]}, size=10000)
-            for hit in res['hits']['hits']: ocr_kf_ids.add(hit['_source']['keyframe_id'])
+            try:
+                res = es_client.search(
+                    index=settings.OCR_INDEX, 
+                    body={"query": {"match": {"text": ocr_query}}, "_source": ["keyframe_id"]}, 
+                    size=10000
+                )
+                
+                # Fixed: Only access res['hits']['hits'], not res['hits']['hits']['hits']
+                for hit in res['hits']['hits']:
+                    try:
+                        # Try different ways to get keyframe_id
+                        keyframe_id = None
+                        
+                        # Method 1: Standard _source
+                        if '_source' in hit and 'keyframe_id' in hit['_source']:
+                            keyframe_id = hit['_source']['keyframe_id']
+                        
+                        # Method 2: Check if 'entity' exists (your original structure)
+                        elif 'entity' in hit:
+                            if isinstance(hit['entity'], dict):
+                                if 'entity' in hit['entity'] and 'keyframe_id' in hit['entity']['entity']:
+                                    keyframe_id = hit['entity']['entity']['keyframe_id']
+                                elif 'keyframe_id' in hit['entity']:
+                                    keyframe_id = hit['entity']['keyframe_id']
+                        
+                        # Method 3: Direct access
+                        elif 'keyframe_id' in hit:
+                            keyframe_id = hit['keyframe_id']
+                        
+                        if keyframe_id:
+                            ocr_kf_ids.add(keyframe_id)
+                        else:
+                            # Debug: print hit structure if keyframe_id not found
+                            print(f"DEBUG - OCR hit structure: {list(hit.keys())}")
+                            if '_source' in hit:
+                                print(f"DEBUG - _source keys: {list(hit['_source'].keys())}")
+                            
+                    except Exception as e:
+                        print(f"Error processing OCR hit: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"OCR search failed: {e}")
+                ocr_kf_ids = set()
+        
+        # ASR Search  
         if asr_query:
             asr_video_ids = set()
-            res = es_client.search(index=settings.ASR_INDEX, body={"query": {"match": {"text": asr_query}}, "_source": ["video_id"]}, size=10000)
-            for hit in res['hits']['hits']: asr_video_ids.add(hit['_source']['video_id'])
+            try:
+                res = es_client.search(
+                    index=settings.ASR_INDEX, 
+                    body={"query": {"match": {"text": asr_query}}, "_source": ["video_id"]}, 
+                    size=10000
+                )
+                
+                # Fixed: Only access res['hits']['hits'], not res['hits']['hits']['hits']
+                for hit in res['hits']['hits']:
+                    try:
+                        # Try different ways to get video_id
+                        video_id = None
+                        
+                        # Method 1: Standard _source
+                        if '_source' in hit and 'video_id' in hit['_source']:
+                            video_id = hit['_source']['video_id']
+                        
+                        # Method 2: Check if 'entity' exists (your original structure)
+                        elif 'entity' in hit:
+                            if isinstance(hit['entity'], dict):
+                                if 'entity' in hit['entity'] and 'video_id' in hit['entity']['entity']:
+                                    video_id = hit['entity']['entity']['video_id']
+                                elif 'video_id' in hit['entity']:
+                                    video_id = hit['entity']['video_id']
+                        
+                        # Method 3: Direct access
+                        elif 'video_id' in hit:
+                            video_id = hit['video_id']
+                        
+                        if video_id:
+                            asr_video_ids.add(video_id)
+                        else:
+                            # Debug: print hit structure if video_id not found
+                            print(f"DEBUG - ASR hit structure: {list(hit.keys())}")
+                            if '_source' in hit:
+                                print(f"DEBUG - _source keys: {list(hit['_source'].keys())}")
+                            
+                    except Exception as e:
+                        print(f"Error processing ASR hit: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"ASR search failed: {e}")
+                asr_video_ids = set()
+        
         return ocr_kf_ids, asr_video_ids
 
     def _format_results(self, sorted_candidates: List[Tuple[str, Dict]]) -> List[Dict]:
