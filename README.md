@@ -126,6 +126,10 @@ docker build -t video-retrieval-backend --target runtime .
 
 docker build -t video-retrieval-backend .
 docker run (--gpus all) -p 8000:8000 video-retrieval-backend
+
+# build rồi chạy này để lưu vector vô milvus
+docker run --rm -it --gpus all -e KEYFRAME_ROOT_DIR="/data/30v" -v "$PWD/app:/app/app" video-retrieval-backend python -m app.milvus_flow
+
 ```
 
 ## 📡 API Endpoints
