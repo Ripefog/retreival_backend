@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "models/beit3.spm")
     CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH", "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
     CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH", "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
-    KEYFRAME_ROOT_DIR: str  = r"data\30v"
+    KEYFRAME_ROOT_DIR: str  = r"/data/30v"
     # --- Model & Processing Configuration ---
     # Tự động phát hiện CUDA nếu có, nếu không thì dùng CPU.
     # Không nên set cứng là "cuda", để code tự quyết định sẽ linh hoạt hơn.
