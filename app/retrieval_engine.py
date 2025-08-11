@@ -29,8 +29,8 @@ from colormath.color_objects import sRGBColor, LabColor
 from colormath.color_conversions import convert_color
 from colormath.color_diff import delta_e_cie2000
 # Import từ các module của ứng dụng
-from .config import settings
-from .database import db_manager
+from config import settings
+from database import db_manager
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,127 @@ class BEiT3Config:
         self.moe_eval_capacity_token_fraction = 0.25; self.moe_second_expert_policy = "random"
         self.moe_normalize_gate_prob_before_dropping = False; self.use_xmoe = False; self.fsdp = False
         self.ddp_rank = 0; self.flash_attention = False; self.scale_length = 2048; self.layernorm_eps = 1e-5
+
+
+class FeatureExtractor:
+    def __init__(self, device):
+        print("Initializing unified FeatureExtractor...")
+        self.device = device
+        self.beit3_loaded = False
+
+        # === 1. Tải mô hình CLIP (giữ nguyên) ===
+        print("Loading CLIP model (ViT-H-14)...")
+        clip_model_name = 'ViT-H-14'
+        clip_model_path = settings.CLIP_MODEL_PATH
+        if not os.path.exists(clip_model_path):
+            raise FileNotFoundError(f"CLIP model not found at {clip_model_path}.")
+
+        self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
+            model_name=clip_model_name,
+            pretrained=clip_model_path,
+            device=self.device
+        )
+        self.clip_model.eval()
+        self.clip_tokenizer = open_clip.get_tokenizer(clip_model_name)
+        print("[✔] CLIP model loaded.")
+
+        # === 2. Tải mô hình BEiT-3 (PROPER WAY) ===
+        print("Loading BEiT-3 model...")
+        try:
+            beit3_checkpoint_path = settings.BEIT3_MODEL_PATH
+            # beit3_checkpoint_path = "/kaggle/working/beit3_large_patch16_384_coco_retrieval.pth"
+            if not os.path.exists(beit3_checkpoint_path):
+                raise FileNotFoundError(f"BEiT-3 model not found.")
+
+            beit3_config = BEiT3Config()
+            self.beit3_model = BEiT3ForRetrieval(beit3_config)
+            checkpoint = torch.load(beit3_checkpoint_path, map_location="cpu")
+            self.beit3_model.load_state_dict(checkpoint["model"])
+            self.beit3_model = self.beit3_model.to(self.device).eval()
+
+            # PROPER TOKENIZER LOADING
+            print("Loading BEiT-3 tokenizer (SentencePiece)...")
+            spm_path = settings.BEIT3_SPM_PATH
+            if not os.path.exists(spm_path):
+                raise FileNotFoundError(f"Tokenizer not found at {spm_path}")
+
+            self.beit3_sp_model = spm.SentencePieceProcessor()
+            self.beit3_sp_model.load(spm_path)
+
+            self.beit3_preprocess = transforms.Compose([
+                transforms.Resize((384, 384), interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ])
+
+            self.beit3_loaded = True
+            print("[✔] BEiT-3 model and tokenizer loaded successfully.")
+
+        except Exception as e:
+            print(f"[❌] BEiT-3 loading failed: {e}")
+            self.beit3_loaded = False
+
+        print(f"\n[✔] FeatureExtractor ready - CLIP: ✅, BEiT-3: {'✅' if self.beit3_loaded else '❌'}")
+
+    def get_image_embeddings(self, frame_cv: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Trích xuất embedding cho ảnh."""
+        image_pil = Image.fromarray(cv2.cvtColor(frame_cv, cv2.COLOR_BGR2RGB))
+
+        with torch.no_grad():
+            # CLIP
+            clip_image = self.clip_preprocess(image_pil).unsqueeze(0).to(self.device)
+            clip_emb = self.clip_model.encode_image(clip_image).cpu().numpy()[0]
+            clip_emb /= np.linalg.norm(clip_emb)
+
+            # BEiT-3
+            if self.beit3_loaded:
+                try:
+                    beit3_image = self.beit3_preprocess(image_pil).unsqueeze(0).to(self.device)
+                    beit3_emb, _ = self.beit3_model(image=beit3_image, only_infer=True)
+                    beit3_emb = beit3_emb.cpu().numpy()[0]
+                except Exception as e:
+                    print(f"BEiT-3 image encoding error: {e}")
+                    beit3_emb = np.zeros(768)
+                    # beit3_emb = np.zeros(1024)
+            else:
+                beit3_emb = np.zeros(768)
+                # beit3_emb = np.zeros(1024)
+
+        return clip_emb, beit3_emb
+
+    def get_clip_text_embedding(self, text: str) -> np.ndarray:
+        """CLIP text embedding."""
+        with torch.no_grad():
+            tokens = self.clip_tokenizer([text]).to(self.device)
+            text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
+            text_emb /= np.linalg.norm(text_emb)
+        return text_emb
+
+    def get_beit3_text_embedding(self, text: str) -> np.ndarray:
+        """BEiT-3 text embedding (PROPER WAY)."""
+        if not self.beit3_loaded:
+            return np.zeros(768)
+            # return np.zeros(1024)
+
+        try:
+            with torch.no_grad():
+                # PROPER TOKENIZATION
+                text_ids = self.beit3_sp_model.encode_as_ids(text)
+                text_padding_mask = [0] * len(text_ids)
+
+                text_ids = torch.tensor(text_ids, dtype=torch.long).unsqueeze(0).to(self.device)
+                text_padding_mask = torch.tensor(text_padding_mask, dtype=torch.long).unsqueeze(0).to(self.device)
+
+                _, text_emb = self.beit3_model(
+                    text_description=text_ids,
+                    text_padding_mask=text_padding_mask,
+                    only_infer=True
+                )
+                return text_emb.cpu().numpy()[0]
+        except Exception as e:
+            print(f"BEiT-3 text encoding error: {e}")
+            return np.zeros(768)
+            # return np.zeros(1024)
 
 class ObjectColorDetector:
     """Sử dụng Co-DETR để phát hiện đối tượng và màu sắc chính của chúng."""
@@ -438,7 +559,7 @@ class HybridRetriever:
                     for query_color, query_bbox in queries:
                         delta_e = None
                         iou = None
-
+                        #chuyển query_color từ rgb qua lab
                         color_term = 0.0
                         if query_color is not None and stored_color is not None:
                             delta_e = self._compare_color(tuple(query_color), tuple(stored_color))

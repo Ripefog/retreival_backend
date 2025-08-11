@@ -47,6 +47,23 @@ RUN wget https://github.com/addf400/files/releases/download/beit3/beit3_base_pat
 # [CẬP NHẬT] Tải model Co-DETR từ Google Drive bằng gdown với File ID mới
 # File ID mới: 1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO
 RUN gdown '1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO' -O /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth
+# --- Download keyframes (30v.zip) from Google Drive via gdown and unzip ---
+# File ID lấy từ link của bạn
+ARG KEYFRAMES_ID=1b1YJcWW8q7m-8f9WS71p9j2yqPjXQ5uD
+ARG KEYFRAMES_DIR=/data/30v
+
+# Cần unzip để giải nén
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Tải 30v.zip và giải nén vào KEYFRAMES_DIR
+RUN mkdir -p "${KEYFRAMES_DIR}" && \
+    gdown --id "${KEYFRAMES_ID}" -O /tmp/30v.zip && \
+    unzip -q /tmp/30v.zip -d "${KEYFRAMES_DIR}" && \
+    rm -f /tmp/30v.zip
+
+# (tuỳ chọn) cho app biết nơi chứa keyframes
+ENV KEYFRAME_ROOT_DIR=${KEYFRAMES_DIR}
 
 # --- Cài đặt Co-DETR ---
 RUN git clone https://github.com/Sense-X/Co-DETR.git /app/Co-DETR-temp && \
