@@ -36,7 +36,7 @@ from .database import db_manager
 
 logger = logging.getLogger(__name__)
 
-# --- (Các class BEiT3Config và ObjectColorDetector giữ nguyên) ---
+# --- Cấu hình cho BEiT-3 (lấy từ repo gốc) ---
 class BEiT3Config:
     def __init__(self):
         self.encoder_embed_dim = 768; self.encoder_attention_heads = 12; self.encoder_layers = 12
@@ -64,8 +64,11 @@ class ObjectColorDetector:
             device=self.device
         )
         self.basic_colors = {'red':(255,0,0), 'green':(0,255,0), 'blue':(0,0,255), 'yellow':(255,255,0), 'cyan':(0,255,255), 'magenta':(255,0,255), 'black':(0,0,0), 'white':(255,255,255), 'gray':(128,128,128), 'orange':(255,165,0), 'brown':(165,42,42), 'pink':(255,192,203), 'purple': (128,0,128)}
+        
+        # === SỬA LỖI Ở ĐÂY: KHỞI TẠO self.basic_colors_lab ===
         self.basic_colors_lab = self._convert_basic_colors_to_lab()
         logger.info("✅ Co-DETR model loaded.")
+
     def _convert_basic_colors_to_lab(self) -> dict:
         lab_dict = {}
         for name, rgb in self.basic_colors.items():
@@ -73,21 +76,25 @@ class ObjectColorDetector:
             lab_obj = convert_color(rgb_obj, LabColor)
             lab_dict[name] = lab_obj
         return lab_dict
+
     def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
         rgb_obj = sRGBColor(*rgb, is_upscaled=True)
         lab_obj = convert_color(rgb_obj, LabColor)
         return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
-    def _get_closest_color_name(self, rgb: Tuple[int, int, int]) -> str:
-        rgb_color = sRGBColor(*rgb, is_upscaled=True)
-        lab_color = convert_color(rgb_color, LabColor)
+
+    def _get_closest_color_name(self, rgb_query: Tuple[int, int, int]) -> str:
+        lab_query = self._rgb_to_lab(rgb_query)
+        query_color_obj = LabColor(lab_query[0], lab_query[1], lab_query[2])
+        
         min_delta = float('inf')
-        closest_name = None
-        for name, lab_ref in self.basic_colors_lab.items():
-            delta = delta_e_cie2000(lab_color, lab_ref)
+        closest_name = "unknown"
+        for name, lab_ref_obj in self.basic_colors_lab.items():
+            delta = delta_e_cie2000(query_color_obj, lab_ref_obj)
             if delta < min_delta:
                 min_delta = delta
                 closest_name = name
         return closest_name
+
     def detect(self, image_path: str) -> Tuple[List[Tuple[float, float, float]], Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]]:
         try:
             result = inference_detector(self.model, image_path)
@@ -120,6 +127,7 @@ class ObjectColorDetector:
             return [], {}
 
 class HybridRetriever:
+    # ... (các hàm __init__, initialize, _load_models, get_*_embedding, _compare_*, search, ... giữ nguyên)
     def __init__(self):
         self.db_manager = db_manager; self.device = settings.DEVICE; self.initialized = False
         self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
@@ -197,7 +205,6 @@ class HybridRetriever:
         
         if mode == 'hybrid' and candidate_info: self._hybrid_reranking(candidate_info, text_query)
         
-        # KHÔI PHỤC LOGIC GỌI HÀM
         if object_filters or color_filters: 
             self._apply_object_color_filters(candidate_info, object_filters, color_filters, top_k)
             
@@ -236,9 +243,6 @@ class HybridRetriever:
                 else: info['score'] *= 0.8; info['reasons'].append("BEIT-3 vector missing")
         except Exception as e: logger.error(f"BEIT-3 reranking failed: {e}")
 
-    # ======================================================================
-    # === CÁC HÀM BỊ MẤT ĐÃ ĐƯỢC KHÔI PHỤC ===
-    # ======================================================================
     def _safe_get_label(self, entity: Dict[str, Any]) -> Optional[str]:
         if not entity: return None
         if isinstance(entity, dict) and 'label' in entity and entity['label']: return entity['label']
@@ -300,13 +304,25 @@ class HybridRetriever:
         if color_filters:
             for query_color in color_filters:
                 if not (isinstance(query_color, (list, tuple)) and len(query_color) == 3): continue
-                color_vector = self.get_clip_text_embedding(f"the color {self._get_closest_color_name(query_color)}").tolist() # Example conversion
-                color_hits = self._search_milvus(settings.COLOR_COLLECTION, color_vector, top_k * 10)
-                for hit in color_hits:
-                    kf_id_parts = hit['id'].split('_'); kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
-                    if kf_id in candidate_info:
-                        candidate_info[kf_id]['score'] += 0.05
-                        candidate_info[kf_id]['reasons'].append(f"Color match for {query_color}")
+                
+                # === SỬA LỖI Ở ĐÂY ===
+                # Chuyển đổi màu LAB sang RGB số nguyên để dùng cho _get_closest_color_name
+                try:
+                    lab_obj = LabColor(lab_l=query_color[0], lab_a=query_color[1], lab_b=query_color[2])
+                    rgb_obj = convert_color(lab_obj, sRGBColor)
+                    # Chuyển đổi sang tuple số nguyên (0-255)
+                    rgb_tuple_int = tuple(int(c * 255) for c in rgb_obj.get_value_tuple())
+                    closest_color_name = self.object_detector._get_closest_color_name(rgb_tuple_int)
+                    color_vector = self.get_clip_text_embedding(f"the color {closest_color_name}").tolist()
+                    color_hits = self._search_milvus(settings.COLOR_COLLECTION, color_vector, top_k * 10)
+                    for hit in color_hits:
+                        kf_id_parts = hit['id'].split('_'); kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
+                        if kf_id in candidate_info:
+                            candidate_info[kf_id]['score'] += 0.05
+                            candidate_info[kf_id]['reasons'].append(f"Color match for {query_color}")
+                except Exception as e:
+                    logger.warning(f"Could not process color filter for {query_color}: {e}")
+                    continue
 
     def _apply_text_filters(self, candidate_info: Dict, ocr_kf_ids: Optional[Set[str]], asr_video_ids: Optional[Set[str]]) -> Dict:
         if not ocr_kf_ids and not asr_video_ids: return candidate_info
@@ -348,10 +364,6 @@ class HybridRetriever:
         if not self.object_detector: raise RuntimeError("Object detector is not initialized.")
         dominant_colors, object_colors = self.object_detector.detect(image_path)
         return object_colors, dominant_colors
-    
-    # ======================================================================
-    # === CÁC HÀM PHÂN PHỐI CÔNG VIỆC ===
-    # ======================================================================
     
     def get_all_video_ids(self) -> List[str]:
         if not self.initialized: raise RuntimeError("Retriever is not initialized.")
