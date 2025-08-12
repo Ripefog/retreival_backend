@@ -17,24 +17,24 @@ class Settings(BaseSettings):
     
     # --- Milvus Configuration ---
     # Có thể ghi đè bằng cách set biến môi trường, ví dụ: export MILVUS_HOST="my-milvus.com"
-    MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
-    MILVUS_PORT: int = 17254
+    MILVUS_HOST: str = "1.53.19.130"
+    MILVUS_PORT: int = 19530
     MILVUS_ALIAS: str = "default"
     MILVUS_USER: Optional[str] = None
     MILVUS_PASSWORD: Optional[str] = None
     
     # --- Elasticsearch/OpenSearch Configuration ---
-    ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 13080
+    ELASTICSEARCH_HOST: str = "1.53.19.130"
+    ELASTICSEARCH_PORT: int = 9200
     ELASTICSEARCH_USERNAME: Optional[str] = None
     ELASTICSEARCH_PASSWORD: Optional[str] = None
     ELASTICSEARCH_USE_SSL: bool = False
     
     # --- Milvus Collection Names ---
-    CLIP_COLLECTION: str = 'arch_clip_image_v3'
-    BEIT3_COLLECTION: str = 'arch_beit3_image_v3'
-    OBJECT_COLLECTION: str = 'arch_object_name_v3'
-    COLOR_COLLECTION: str = 'arch_color_name_v3'
+    CLIP_COLLECTION: str = 'arch_clip_image_v1'
+    BEIT3_COLLECTION: str = 'arch_beit3_image_v1'
+    OBJECT_COLLECTION: str = 'arch_object_name_v1'
+    COLOR_COLLECTION: str = 'arch_color_name_v1'
     
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'

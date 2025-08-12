@@ -5,9 +5,10 @@ import shutil
 import tempfile
 import logging
 from contextlib import asynccontextmanager
-
+from pydantic import ValidationError
 import uvicorn
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -20,6 +21,7 @@ from .models import (
     search_examples, 
     compare_examples
 )
+from typing import List, Dict, Any, Optional
 
 # Cấu hình logging cơ bản cho ứng dụng
 logging.basicConfig(
@@ -29,7 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Khai báo biến global cho retriever engine
-from typing import Optional
 retriever: Optional[HybridRetriever] = None
 
 @asynccontextmanager
@@ -72,13 +73,21 @@ app = FastAPI(
 # Cấu hình CORS để cho phép truy cập từ các domain khác (ví dụ: frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Trong production, nên giới hạn lại: ["http://localhost:3000"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# === API Endpoints ===
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error(f"Validation error: {exc}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()}
+    )
+
+# === General Endpoints ===
 
 @app.get("/", tags=["General"])
 async def root():
@@ -91,8 +100,8 @@ async def health_check():
     if not retriever:
         raise HTTPException(status_code=503, detail="Retriever service is not available.")
     
-    milvus_status = retriever.check_milvus_connection()
-    es_status = retriever.check_elasticsearch_connection()
+    milvus_status = db_manager.check_milvus_connection()
+    es_status = db_manager.check_elasticsearch_connection()
     
     is_healthy = (
         milvus_status.get("status") == "connected" and
@@ -114,6 +123,8 @@ async def health_check():
         "milvus": milvus_status,
         "elasticsearch": es_status,
     }
+
+# === Search Endpoints ===
 
 @app.post("/search", response_model=SearchResponse, tags=["Search"])
 async def search_videos(request: SearchRequest = Body(..., examples=search_examples)):
@@ -158,6 +169,8 @@ async def compare_search_modes(request: SearchRequest = Body(..., examples=compa
         comparison_results[mode] = {"results": results, "total_results": len(results)}
     return {"query": request.text_query, "comparison": comparison_results}
 
+# === Processing Endpoints ===
+
 @app.post("/process/image-objects", response_model=ImageObjectsResponse, tags=["Processing"])
 async def process_image_for_objects(file: UploadFile = File(..., description="File ảnh để phân tích.")):
     """
@@ -168,7 +181,6 @@ async def process_image_for_objects(file: UploadFile = File(..., description="Fi
     if not retriever or not retriever.object_detector:
         raise HTTPException(status_code=503, detail="Object Detector is not available.")
     
-    # Lưu file tải lên vào một file tạm thời vì Co-DETR yêu cầu đường dẫn file
     with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
@@ -177,13 +189,68 @@ async def process_image_for_objects(file: UploadFile = File(..., description="Fi
         objects, colors = retriever.detect_objects_in_image(tmp_path)
         return ImageObjectsResponse(objects=objects, colors=colors)
     finally:
-        # Đảm bảo dọn dẹp file tạm sau khi xử lý xong
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
+# === Admin Endpoints ===
+
+@app.post("/admin/distribute-tasks", 
+          tags=["Admin"], 
+          summary="Phân chia video cho người dùng",
+          response_description="Kết quả phân chia chi tiết bao gồm thống kê và danh sách gán cụ thể.")
+async def distribute_tasks_to_workers(user_list_payload: Dict[str, List[str]] = Body(
+    ..., 
+    examples={
+        "default": {
+            "summary": "Phân chia cho 5 người dùng",
+            "value": { "user_list": ["worker_alpha", "worker_beta", "worker_gamma", "worker_delta", "worker_epsilon"] }
+        },
+        "minimum_users": {
+            "summary": "Phân chia cho 2 người dùng",
+            "value": { "user_list": ["user_1", "user_2"] }
+        }
+    }
+)):
+    """
+    **Phân chia tất cả video trong hệ thống cho một nhóm người dùng (workers).**
+
+    API này thực hiện các công việc sau:
+    1. Lấy danh sách tất cả các video ID duy nhất từ cơ sở dữ liệu.
+    2. Nhận vào một danh sách các `user_id`.
+    3. Tạo tất cả các cặp người dùng có thể có.
+    4. Gán mỗi video cho một cặp người dùng, sử dụng thuật toán tham lam (greedy) để 
+       đảm bảo khối lượng công việc của mỗi người dùng là cân bằng nhất có thể.
+
+    - **Input**: Một JSON object chứa key `user_list` là một mảng các chuỗi.
+    - **Output**: Một JSON object chứa:
+        - `summary`: Tóm tắt kết quả phân phối.
+        - `user_counts`: Thống kê số video mỗi người dùng được gán.
+        - `assignments`: Chi tiết việc gán mỗi video ID cho cặp người dùng nào.
+    """
+    if not retriever:
+        raise HTTPException(status_code=503, detail="Retriever service is not initialized.")
+    
+    user_list = user_list_payload.get("user_list")
+    if not user_list or not isinstance(user_list, list):
+         raise HTTPException(
+            status_code=422, # Unprocessable Entity
+            detail="Payload must be a JSON object with a key 'user_list' containing a list of strings."
+        )
+
+    try:
+        logger.info(f"Received request to distribute tasks for users: {user_list}")
+        result = retriever.distribute_videos_to_workers(user_list)
+        return result
+    except ValueError as e:
+        # Lỗi do người dùng nhập vào (ví dụ: ít hơn 2 user)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Các lỗi hệ thống khác
+        logger.error(f"An unexpected error occurred during task distribution: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred during the task distribution process.")
+
+
 if __name__ == "__main__":
-    # Chạy server Uvicorn khi thực thi file này trực tiếp
-    # Hữu ích cho việc phát triển và gỡ lỗi cục bộ
     uvicorn.run(
         "app.main:app",
         host=settings.API_HOST,
