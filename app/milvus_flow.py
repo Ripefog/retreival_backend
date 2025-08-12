@@ -132,7 +132,7 @@ if __name__ == '__main__':
                 for value in object_colors_lab[label]:
                     color, bbox = value
                     valuee = ",".join(map(str, list(color) + list(bbox)))
-                    object_entry_id = f"{keyframe_id}_obj_{label}"
+                    object_entry_id = f"{keyframe_id}"
                     managers['object'].insert([
                         [object_entry_id],
                         [obj_emb.tolist()],  # Đưa embedding của đối tượng
@@ -144,7 +144,7 @@ if __name__ == '__main__':
             # Lưu màu sắc chủ đạo (dominant colors) vào Milvus
             for i, color in enumerate(dominant_colors_lab):
                 # Tạo PK duy nhất cho mỗi entry color (tính theo index)
-                color_entry_id = f"{keyframe_id}_color_{i}"
+                color_entry_id = f"{keyframe_id}"
                 managers['color'].insert([
                     [color_entry_id],
                     [list(color)],  # Lưu màu LAB dưới dạng list (L, A, B)
