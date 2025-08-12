@@ -59,7 +59,7 @@ RUN git clone https://github.com/Sense-X/Co-DETR.git /app/Co-DETR-temp && \
 RUN git clone https://github.com/microsoft/unilm.git /app/unilm && \
     pip install --no-cache-dir -r /app/unilm/beit3/requirements.txt && \
     pip uninstall -y protobuf && pip install --no-cache-dir protobuf==3.20.3
-
+RUN pip install icecream
 # ==============================================================================
 # STAGE 3: Cấu hình và chạy ứng dụng
 # ==============================================================================
