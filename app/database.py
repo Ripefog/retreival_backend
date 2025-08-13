@@ -32,12 +32,13 @@ class DatabaseManager:
 
     async def connect_milvus(self):
         """Thiết lập kết nối đến máy chủ Milvus."""
+        connections.disconnect("default")
         try:
             logger.info(f"Connecting to Milvus at {settings.MILVUS_HOST}:{settings.MILVUS_PORT}...")
             connections.connect(
-                alias=settings.MILVUS_ALIAS,
-                host=settings.MILVUS_HOST,
-                port=settings.MILVUS_PORT,
+                alias="default",
+                host="1.53.19.130",
+                port=19530,
                 user=settings.MILVUS_USER,
                 password=settings.MILVUS_PASSWORD,
             )
@@ -89,7 +90,7 @@ class DatabaseManager:
                 settings.CLIP_COLLECTION,
                 settings.BEIT3_COLLECTION,
                 settings.OBJECT_COLLECTION,
-                settings.COLOR_COLLECTION
+                # settings.COLOR_COLLECTION
             ]
             
             for name in collection_names:
@@ -106,6 +107,23 @@ class DatabaseManager:
     
     def get_collection(self, collection_name: str) -> Optional[Collection]:
         """Lấy một collection đã được tải theo tên."""
+        try:
+            collections = utility.list_collections()
+            if collections:
+                print(f"Đã tìm thấy {len(collections)} collection(s):\n")
+                for name in collections:
+                    col = Collection(name)
+                    print(f"Collection: {name}")
+                    print(f" ├─ Số vector: {col.num_entities}")
+                    print(f" ├─ Schema:")
+                    for field in col.schema.fields:
+                        print(f" │    ├─ {field.name} ({field.dtype})")
+                    print(f" └─ Index: {[index.params for index in col.indexes]}")
+                    print()
+            else:
+                print("Không có collection nào trong Milvus.")
+        except Exception as e:
+            print("Lỗi khi truy vấn Milvus:", e)
         return self.collections.get(collection_name)
     
     def check_milvus_connection(self) -> Dict[str, Any]:

@@ -174,6 +174,12 @@ class HybridRetriever:
         self.initialized = True
         logger.info("✅ Hybrid Retriever initialized successfully.")
 
+    def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+        """Convert RGB tuple to CIELAB tuple."""
+        rgb_obj = sRGBColor(*rgb, is_upscaled=True)
+        lab_obj = convert_color(rgb_obj, LabColor)
+        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
+
     def _load_models(self):
         """Tải tất cả các mô hình AI cần thiết vào đúng device."""
         logger.info(f"Loading AI models onto device: '{self.device}'")
@@ -237,73 +243,34 @@ class HybridRetriever:
         #         self._fix_numpy()
         #         delta_e = delta_e_cie2000(color1_lab, color2_lab)
         #         return delta_e
-
-    def _compare_bbox(bbox1, bbox2, eps: float = 1e-9) -> float:
-        """
-        Tính IoU cho hai bounding box theo định dạng (x_min, y_min, x_max, y_max).
-        Trả về giá trị trong [0, 1]. Nếu union == 0 trả về 0.0.
-        """
-        print(f"Input bbox1: {bbox1}")
-        print(f"Input bbox2: {bbox2}")
-
+    # @staticmethod
+    def _compare_bbox(self, bbox1, bbox2):
+        """So sánh hai bounding box bằng IoU (Intersection over Union)."""
         x1_min, y1_min, x1_max, y1_max = bbox1
         x2_min, y2_min, x2_max, y2_max = bbox2
-        print(f"Bbox1 unpacked: x1_min={x1_min}, y1_min={y1_min}, x1_max={x1_max}, y1_max={y1_max}")
-        print(f"Bbox2 unpacked: x2_min={x2_min}, y2_min={y2_min}, x2_max={x2_max}, y2_max={y2_max}")
 
-        # Chuẩn hoá (nếu cần) để đảm bảo x_min <= x_max, y_min <= y_max
-        x1_min, x1_max = min(x1_min, x1_max), max(x1_min, x1_max)
-        y1_min, y1_max = min(y1_min, y1_max), max(y1_min, y1_max)
-        x2_min, x2_max = min(x2_min, x2_max), max(x2_min, x2_max)
-        y2_min, y2_max = min(y2_min, y2_max), max(y2_min, y2_max)
-        print(f"Bbox1 normalized: x1_min={x1_min}, y1_min={y1_min}, x1_max={x1_max}, y1_max={y1_max}")
-        print(f"Bbox2 normalized: x2_min={x2_min}, y2_min={y2_min}, x2_max={x2_max}, y2_max={y2_max}")
-
-        # Overlap (lưu ý vẫn dùng max(0, ...))
-        x_overlap_calc = min(x1_max, x2_max) - max(x1_min, x2_min)
-        y_overlap_calc = min(y1_max, y2_max) - max(y1_min, y2_min)
-        print(f"X overlap calculation: min({x1_max}, {x2_max}) - max({x1_min}, {x2_min}) = {x_overlap_calc}")
-        print(f"Y overlap calculation: min({y1_max}, {y2_max}) - max({y1_min}, {y2_min}) = {y_overlap_calc}")
-
-        x_overlap = max(0.0, x_overlap_calc)
-        y_overlap = max(0.0, y_overlap_calc)
-        print(f"X overlap (after max with 0): {x_overlap}")
-        print(f"Y overlap (after max with 0): {y_overlap}")
-
+        # Tính diện tích giao nhau
+        x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
+        y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
         intersection = x_overlap * y_overlap
-        print(f"Intersection area: {x_overlap} * {y_overlap} = {intersection}")
+        # ic(x_overlap, y_overlap)
+        # Tính diện tích của mỗi bbox
+        area1 = (x1_max - x1_min) * (y1_max - y1_min)
+        area2 = (x2_max - x2_min) * (y2_max - y2_min)
 
-        # Area (dùng max(0, ...) để tránh diện tích âm)
-        area1_width = max(0.0, x1_max - x1_min)
-        area1_height = max(0.0, y1_max - y1_min)
-        area1 = area1_width * area1_height
-        print(
-            f"Area1: max(0, {x1_max} - {x1_min}) * max(0, {y1_max} - {y1_min}) = {area1_width} * {area1_height} = {area1}")
-
-        area2_width = max(0.0, x2_max - x2_min)
-        area2_height = max(0.0, y2_max - y2_min)
-        area2 = area2_width * area2_height
-        print(
-            f"Area2: max(0, {x2_max} - {x2_min}) * max(0, {y2_max} - {y2_min}) = {area2_width} * {area2_height} = {area2}")
-
+        # Tính IoU
         union = area1 + area2 - intersection
-        print(f"Union: {area1} + {area2} - {intersection} = {union}")
+        iou = intersection / union if union > 0 else 0
+        # ic(union, intersection, iou)
+        return iou
 
-        if union <= eps:
-            print(f"Union ({union}) <= eps ({eps}), returning 0.0")
-            return 0.0
-
-        iou_result = intersection / union
-        print(f"IoU: {intersection} / {union} = {iou_result}")
-
-        return iou_result
     # --- LOGIC TÌM KIẾM CHÍNH ---
     def search(self, text_query: str, mode: str, object_filters: Optional[List[str]], color_filters: Optional[List[str]],
                ocr_query: Optional[str], asr_query: Optional[str], top_k: int) -> List[Dict[str, Any]]:
         if not self.initialized: raise RuntimeError("Retriever is not initialized.")
         start_time = time.time()
         logger.info(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
-        
+        ic(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
         candidate_info: Dict[str, Dict[str, Any]] = {}
         num_initial_candidates = top_k * 5 # Lấy số lượng ứng viên ban đầu lớn hơn
 
@@ -322,18 +289,19 @@ class HybridRetriever:
                 candidate_info[hit['entity']['keyframe_id']] = {'video_id': hit['entity']['video_id'], 'timestamp': hit['entity']['timestamp'], 'beit3_score': score, 'score': score, 'reasons': [f"BEIT-3 match ({score:.3f})"]}
 
         # GĐ2: TINH CHỈNH (chỉ cho mode hybrid)
-        if mode == 'hybrid' and candidate_info: self._hybrid_reranking(candidate_info, text_query)
-
+        if mode == 'hybrid' and candidate_info:
+            ic(candidate_info)
+            self._hybrid_reranking(candidate_info, text_query)
         # GĐ3: TĂNG ĐIỂM với Object/Color
         if object_filters or color_filters:
-            ic(object_filters)
+            # ic(object_filters)
             self._apply_object_color_filters(candidate_info, object_filters, color_filters, top_k)
 
         # GĐ4: LỌC CỨNG với OCR/ASR
         if ocr_query or asr_query:
             ocr_kf_ids, asr_video_ids = self._search_es(ocr_query, asr_query)
             candidate_info = self._apply_text_filters(candidate_info, ocr_kf_ids, asr_video_ids)
-        
+
         # GĐ5: XẾP HẠNG VÀ TRẢ VỀ
         # ic(candidate_info)
         sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
@@ -342,70 +310,68 @@ class HybridRetriever:
         logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
         return final_results
 
-    # --- CÁC HÀM HELPER CHO LOGIC TÌM KIẾM ---
     def _search_milvus(self, collection_name: str, vector: List[float], top_k: int) -> List[Dict]:
-        ic("alo", collection_name)
+        ic("alo00", collection_name)
+        # Tải sẵn các collection (idempotent)
+        self.db_manager._load_milvus_collections()
+
         collection = self.db_manager.get_collection(collection_name)
         ic(collection)
-        if not collection: return []
-        output_fields = ["keyframe_id", "video_id", "timestamp"]
-        if any(getattr(f, "name", None) == "label" for f in collection.schema.fields):
-            output_fields.append("label")
+        if not collection:
+            return []
+
+        # Chọn output_fields theo collection
+        if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
+            output_fields = ["keyframe_id", "timestamp", "object_ids", "lab_colors"]
+        elif collection_name == settings.OBJECT_COLLECTION:
+            output_fields = ["object_id", "bbox_xyxy", "color_lab"]
+        else:
+            output_fields = []
+
         search_results = collection.search(
             data=[vector],
             anns_field="vector",
             param={"metric_type": "L2", "params": {"nprobe": 16}},
             limit=top_k,
-            output_fields=output_fields
+            output_fields=output_fields,
         )[0]
         ic(collection_name, search_results)
-        # Convert Hit objects to dictionaries
+
         hits = []
         for hit in search_results:
-            hit_data = hit.entity.to_dict()['entity']  # Chuyển entity thành dict
-            print(f"Hit data: {hit_data}")  # In ra để kiểm tra dữ liệu trả về từ Milvus
+            hit_data = hit.entity.to_dict()["entity"]
 
-            # --- Làm sạch keyframe_id: cắt mọi thứ sau '.jpg' ---
-            raw_kf = hit_data.get("keyframe_id")
-            kf_clean = raw_kf
-            if isinstance(raw_kf, str):
-                pos = raw_kf.lower().find(".jpg")
-                if pos != -1:
-                    kf_clean = raw_kf[:pos + 4]  # giữ nguyên đến hết '.jpg'
+            if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
+                raw_kf = hit_data.get("keyframe_id", "")
+                if isinstance(raw_kf, str):
+                    pos = raw_kf.lower().find(".jpg")
+                    kf_clean = raw_kf[:pos + 4] if pos != -1 else raw_kf
+                else:
+                    kf_clean = raw_kf
 
-            object_color = None
-            object_bbox = None
-            label = hit_data.get("label")
-            # Trích xuất label và chia nó thành các thành phần màu sắc và bounding box
-            if isinstance(label, str) and label.strip():
-                ic(label)
-                if label.strip().lower() != "alo":
-                    parts = [p.strip() for p in label.split(",") if p.strip() != ""]
-                    if len(parts) >= 7:
-                        try:
-                            object_color = tuple(map(float, parts[:3]))  # (L, A, B)
-                            object_bbox = tuple(map(int, parts[3:7]))  # (xmin, ymin, xmax, ymax)
-                            print(f"Object color: {object_color}, Bbox: {object_bbox}")
-                        except Exception as e:
-                            ic("label_parse_error", e, label)
-                    else:
-                        ic("label_insufficient_parts", parts)
+                hits.append({
+                    "id": kf_clean,
+                    "distance": hit.distance,
+                    "entity": {
+                        "keyframe_id": kf_clean,
+                        "timestamp": hit_data.get("timestamp"),
+                        "object_ids": hit_data.get("object_ids"),  # CSV string
+                        "lab_colors": hit_data.get("lab_colors"),  # CSV string
+                    },
+                })
 
-                # --- Lập hit_dict: thêm object_color & object_bbox, và keyframe_id đã làm sạch ---
-            hit_dict = {
-                'id': kf_clean,
-                'distance': hit.distance,
-                'entity': {
-                    'keyframe_id': kf_clean,
-                    'video_id': hit_data.get('video_id'),
-                    'timestamp': hit_data.get('timestamp')
-                },
-                'object_color': object_color,
-                'object_bbox': object_bbox
-            }
-            hits.append(hit_dict)
+            elif collection_name == settings.OBJECT_COLLECTION:
+                hits.append({
+                    "id": hit_data.get("object_id"),
+                    "distance": hit.distance,
+                    "entity": {
+                        "bbox_xyxy": hit_data.get("bbox_xyxy"),  # CSV string
+                        "color_lab": hit_data.get("color_lab"),  # CSV string
+                    },
+                })
 
         return hits
+
     def _hybrid_reranking(self, candidate_info: Dict[str, Dict], text_query: str):
         beit3_collection = self.db_manager.get_collection(settings.BEIT3_COLLECTION)
         if not beit3_collection: return
@@ -528,7 +494,7 @@ class HybridRetriever:
                 ic("**********************")
                 obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, top_k * 10)
                 ic("**********************")
-                ic(obj_hits)
+                # ic(obj_hits)
                 for hit in obj_hits:
                     kf_id_parts = hit['id'].split('_')
                     kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 4 else hit['id']
@@ -540,13 +506,14 @@ class HybridRetriever:
                     stored_color, stored_bbox = hit['object_color'], hit['object_bbox']
 
                     for query_color, query_bbox in queries:
+                        rgb = self._rgb_to_lab(query_color)
                         delta_e = None
                         iou = None
 
                         color_term = 0.0
                         if query_color is not None and stored_color is not None:
-                            delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
-                            color_term = 1.0 / (1.0 + float(delta_e))
+                            delta_e = self._compare_color(tuple(rgb), tuple(stored_color))
+                            color_term = 0.1 * (1.0 / (1.0 + float(delta_e)))
 
                         bbox_term = 0.0
                         if query_bbox is not None and stored_bbox is not None:
@@ -560,38 +527,38 @@ class HybridRetriever:
                             candidate_info[kf_id]['score'] += score_boost
                             candidate_info[kf_id]['reasons'].append(
                                 f"Object match: '{obj}'"
-                                + (f", ΔE={delta_e:.3f}" if delta_e is not None else "")
-                                + (f", IoU={iou:.3f}" if iou is not None else "")
+                                + (f", ΔE={color_term:.3f}" if delta_e is not None else "")
+                                + (f", IoU={bbox_term:.3f}" if iou is not None else "")
                             )
 
-        # ===== COLOR FILTERS (độc lập) =====
-        if color_filters and 0:
-            for query_color in color_filters:
-                if query_color is None:
-                    continue
-
-                color_hits = self._search_milvus(settings.COLOR_COLLECTION, list(query_color), top_k * 10)
-
-                for hit in color_hits:
-                    label = self._safe_get_label(hit.get('entity', {}))
-                    if not label:
-                        continue
-
-                    stored_color, _ = self._parse_color_bbox_from_label(label)
-                    if stored_color is None:
-                        continue
-
-                    delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
-
-                    kf_id_parts = hit['id'].split('_')
-                    kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
-
-                    if kf_id in candidate_info:
-                        score_boost = max(0.0, 0.1 * (1.0 / (1.0 + float(delta_e))))
-                        candidate_info[kf_id]['score'] += score_boost
-                        candidate_info[kf_id]['reasons'].append(
-                            f"Color match: ΔE={delta_e:.3f} với query {tuple(query_color)}"
-                        )
+        # # ===== COLOR FILTERS (độc lập) =====
+        # if color_filters and 0:
+        #     for query_color in color_filters:
+        #         if query_color is None:
+        #             continue
+        #
+        #         color_hits = self._search_milvus(settings.COLOR_COLLECTION, list(query_color), top_k * 10)
+        #
+        #         for hit in color_hits:
+        #             label = self._safe_get_label(hit.get('entity', {}))
+        #             if not label:
+        #                 continue
+        #
+        #             stored_color, _ = self._parse_color_bbox_from_label(label)
+        #             if stored_color is None:
+        #                 continue
+        #
+        #             delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
+        #
+        #             kf_id_parts = hit['id'].split('_')
+        #             kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
+        #
+        #             if kf_id in candidate_info:
+        #                 score_boost = max(0.0, 0.1 * (1.0 / (1.0 + float(delta_e))))
+        #                 candidate_info[kf_id]['score'] += score_boost
+        #                 candidate_info[kf_id]['reasons'].append(
+        #                     f"Color match: ΔE={score_boost:.3f} với query {tuple(query_color)}"
+        #                 )
 
     def _apply_text_filters(self, candidate_info: Dict, ocr_kf_ids: Optional[Set[str]], asr_video_ids: Optional[Set[str]]) -> Dict:
         if not ocr_kf_ids and not asr_video_ids: return candidate_info
@@ -724,3 +691,46 @@ class HybridRetriever:
     def check_milvus_connection(self) -> Dict[str, Any]: return self.db_manager.check_milvus_connection()
     def check_elasticsearch_connection(self) -> Dict[str, Any]: return self.db_manager.check_elasticsearch_connection()
 # --- END OF FILE app/retrieval_engine.py ---
+
+
+
+
+#
+# {
+#   "text_query": "There are two men with a boat in the river.",
+#   "mode": "hybrid",
+#   "object_filters": {
+#     "boat": [
+#       [[46.353206722122124, -4.904548028573375, 5.2011766925410985], [213, 393, 550, 483]]
+#     ],
+#     "person": [
+#       [[37.71225526048862, -1.0217397637916903, 4.189403003138226], [476, 374, 547, 454]],
+#       [[47.46675155121266, 3.4061168538457864, 11.794993111213802], [200, 338, 252, 422]]
+#     ]
+#   },
+#   "color_filters": [
+#     [76.65912653528162, -0.5829774648731245, -19.05410702358592],
+#     [18.828432444742575, -6.5353777349142215, 12.744719724371178],
+#     [59.29708671909229, -6.493880177980859, 3.162971364802103],
+#     [60.69111602558509, 50.29951194603682, 14.683318638437793],
+#     [34.61410230810931, 58.08672236684348, 44.34712642128737],
+#     [44.31269057964889, -10.4675878934003, 17.099308966327964]
+#   ],
+#   "ocr_query": "string",
+#   "asr_query": "string",
+#   "top_k": 20
+# }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

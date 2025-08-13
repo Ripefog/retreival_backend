@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     ELASTICSEARCH_USE_SSL: bool = False
     
     # --- Milvus Collection Names ---
-    CLIP_COLLECTION: str = 'arch_clip_image_v1'
-    BEIT3_COLLECTION: str = 'arch_beit3_image_v1'
-    OBJECT_COLLECTION: str = 'arch_object_name_v1'
-    COLOR_COLLECTION: str = 'arch_color_name_v1'
+    CLIP_COLLECTION: str = 'arch_clip_image_v6'
+    BEIT3_COLLECTION: str = 'arch_beit3_image_v6'
+    OBJECT_COLLECTION: str = 'arch_object_name_v6'
+    # COLOR_COLLECTION: str = 'arch_color_name_v4'
     
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'

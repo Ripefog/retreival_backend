@@ -23,7 +23,7 @@ gdown
 opensearch-py
 requests-aws4auth
 boto3
-pymilvus==2.3.0 # Nên pin phiên bản pymilvus để đảm bảo ổn định
+pymilvus==v2.4.10 # Nên pin phiên bản pymilvus để đảm bảo ổn định
 python-multipart
 # Core AI libraries (phiên bản sẽ được ghi đè bởi các lệnh cài đặt sau)
 transformers
