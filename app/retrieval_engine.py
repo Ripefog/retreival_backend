@@ -264,6 +264,87 @@ class HybridRetriever:
         # ic(union, intersection, iou)
         return iou
 
+    def _parse_video_id_from_kf(self, kf: str):
+        """
+        Nhận keyframe: L02_L02_V002_1130.04s.jpg hoặc L02_V002_1130.04s.jpg
+        Trả về: (video_id, kf_id) dạng ('L02_V002', 'L02_V002_1130.04s.jpg')
+        """
+        name = os.path.splitext(os.path.basename(kf))[0]
+        parts = name.split("_")
+
+        # bỏ trùng L02_L02 -> giữ 1
+        unique_parts = []
+        for p in parts:
+            if not unique_parts or unique_parts[-1] != p:
+                unique_parts.append(p)
+
+        # timestamp là phần cuối
+        timestamp = unique_parts[-1]
+        # lấy Lxx và Vxxx
+        l_code = None
+        v_code = None
+        for p in unique_parts:
+            if p.upper().startswith("L") and p[1:].isdigit():
+                l_code = p.upper()
+            if p.upper().startswith("V") and p[1:].isdigit():
+                v_code = p.upper()
+
+        video_id = f"{l_code}_{v_code}"
+        kf_id = f"{video_id}_{timestamp}.jpg"
+        return video_id, kf_id
+
+    def _split_csv_ints(self, s: Optional[str]) -> List[int]:
+        """'1,2,3' -> [1,2,3]; bỏ qua phần tử rỗng/lỗi."""
+        if not s:
+            return []
+        out = []
+        for p in s.split(","):
+            p = p.strip()
+            if not p:
+                continue
+            try:
+                out.append(int(p))
+            except ValueError:
+                # phòng trường hợp '12.0'
+                try:
+                    out.append(int(float(p)))
+                except ValueError:
+                    pass
+        return out
+
+    def _split_csv_floats(self, s: Optional[str]) -> List[float]:
+        """'1.2,3,4.5' -> [1.2,3.0,4.5]; bỏ qua phần tử rỗng/lỗi."""
+        if not s:
+            return []
+        out = []
+        for p in s.split(","):
+            p = p.strip()
+            if p == "":
+                continue
+            try:
+                out.append(float(p))
+            except ValueError:
+                pass
+        return out
+
+    def _parse_lab_colors18(self, s: Optional[str]) -> List[Tuple[float, float, float]]:
+        """
+        Nhận chuỗi 18 số (L,a,b * 6 màu), trả về list 6 tuple (L,a,b).
+        Nếu thiếu thì pad 0.0; nếu thừa thì cắt bớt.
+        """
+        vals = self._split_csv_floats(s)
+        if len(vals) < 18:
+            vals += [0.0] * (18 - len(vals))
+        elif len(vals) > 18:
+            vals = vals[:18]
+
+        lab6 = []
+        i = 0
+        while i + 2 < 18:
+            lab6.append((vals[i], vals[i + 1], vals[i + 2]))
+            i += 3
+        return lab6
+
     # --- LOGIC TÌM KIẾM CHÍNH ---
     def search(self, text_query: str, mode: str, object_filters: Optional[List[str]], color_filters: Optional[List[str]],
                ocr_query: Optional[str], asr_query: Optional[str], top_k: int) -> List[Dict[str, Any]]:
@@ -273,25 +354,69 @@ class HybridRetriever:
         ic(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
         candidate_info: Dict[str, Dict[str, Any]] = {}
         num_initial_candidates = top_k * 5 # Lấy số lượng ứng viên ban đầu lớn hơn
-
         # GĐ1: LẤY ỨNG VIÊN BAN ĐẦU
         if mode in ['hybrid', 'clip']:
             clip_vector = self.get_clip_text_embedding(text_query).tolist()
             clip_candidates = self._search_milvus(settings.CLIP_COLLECTION, clip_vector, num_initial_candidates)
+            ic("********************************************************************************")
+            # ic(clip_candidates)
             for hit in clip_candidates:
+                kf_id = hit["entity"]["keyframe_id"]
+                vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
-                candidate_info[hit['entity']['keyframe_id']] = {'video_id': hit['entity']['video_id'], 'timestamp': hit['entity']['timestamp'], 'clip_score': score, 'score': score, 'reasons': [f"CLIP match ({score:.3f})"]}
+                obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
+                lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
+                candidate_info[kf_id] = {
+                    "keyframe_id": kf_id,
+                    "timestamp": hit['entity']['timestamp'],
+                    "object_ids": obj_ids,  # list[int]
+                    "lab_colors6": lab6,  # [(L,a,b)*6]
+                    "clip_score": score,
+                    "score": score,
+                    "reasons": [f"CLIP match ({score:.3f})"],
+                }
         elif mode == 'beit3':
             beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
             beit3_candidates = self._search_milvus(settings.BEIT3_COLLECTION, beit3_vector, num_initial_candidates)
+            ic("************** BEIT3 **************")
+            # ic(beit3_candidates)
+
             for hit in beit3_candidates:
+                kf_id = hit["entity"]["keyframe_id"]
+                vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
-                candidate_info[hit['entity']['keyframe_id']] = {'video_id': hit['entity']['video_id'], 'timestamp': hit['entity']['timestamp'], 'beit3_score': score, 'score': score, 'reasons': [f"BEIT-3 match ({score:.3f})"]}
+                obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
+                lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
+
+                if kf_id in candidate_info:
+                    # đã có từ CLIP → cộng dồn điểm & bổ sung info nếu thiếu
+                    candidate_info[kf_id]['beit3_score'] = score
+                    candidate_info[kf_id]['score'] += score
+                    candidate_info[kf_id]['reasons'].append(f"BEIT-3 match ({score:.3f})")
+
+                    if not candidate_info[kf_id].get('object_ids') and obj_ids:
+                        candidate_info[kf_id]['object_ids'] = obj_ids
+                    if not candidate_info[kf_id].get('lab_colors6') and lab6:
+                        candidate_info[kf_id]['lab_colors6'] = lab6
+                    if candidate_info[kf_id].get('timestamp') is None:
+                        candidate_info[kf_id]['timestamp'] = ent.get('timestamp')
+                else:
+                    # chưa có → tạo mới entry
+                    candidate_info[kf_id] = {
+                        "keyframe_id": kf_id,
+                        "timestamp": hit["entity"]['timestamp'],
+                        "object_ids": obj_ids,  # list[int]
+                        "lab_colors6": lab6,  # [(L,a,b)*6]
+                        "beit3_score": score,
+                        "score": score,
+                        "reasons": [f"BEIT-3 match ({score:.3f})"],
+                    }
 
         # GĐ2: TINH CHỈNH (chỉ cho mode hybrid)
         if mode == 'hybrid' and candidate_info:
-            ic(candidate_info)
+            # ic("trước:::::::: ", candidate_info)
             self._hybrid_reranking(candidate_info, text_query)
+            # ic("sau:::::::: ", candidate_info)
         # GĐ3: TĂNG ĐIỂM với Object/Color
         if object_filters or color_filters:
             # ic(object_filters)
@@ -310,7 +435,7 @@ class HybridRetriever:
         logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
         return final_results
 
-    def _search_milvus(self, collection_name: str, vector: List[float], top_k: int) -> List[Dict]:
+    def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None) -> List[Dict]:
         ic("alo00", collection_name)
         # Tải sẵn các collection (idempotent)
         self.db_manager._load_milvus_collections()
@@ -333,6 +458,7 @@ class HybridRetriever:
             anns_field="vector",
             param={"metric_type": "L2", "params": {"nprobe": 16}},
             limit=top_k,
+            expr=expr,  # <-- quan trọng: giới hạn theo object_id in [...]
             output_fields=output_fields,
         )[0]
         ic(collection_name, search_results)
@@ -489,47 +615,50 @@ class HybridRetriever:
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
             ic(norm_object_filters)
-            for obj, queries in norm_object_filters.items():
-                obj_vector = self.get_clip_text_embedding(obj).tolist()
-                ic("**********************")
-                obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, top_k * 10)
-                ic("**********************")
-                # ic(obj_hits)
-                for hit in obj_hits:
-                    kf_id_parts = hit['id'].split('_')
-                    kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 4 else hit['id']
-                    # ic("aloalo",kf_id_parts, kf_id, candidate_info)
-                    if kf_id not in candidate_info:
+
+            for obj_label, queries in norm_object_filters.items():
+                # vector của nhãn cần tìm
+                obj_vector = self.get_clip_text_embedding(obj_label).tolist()
+
+                # duyệt từng keyframe ứng viên
+                for kf_id, info in candidate_info.items():
+                    obj_ids = info.get("object_ids") or []
+                    if not obj_ids:
                         continue
-                    ic("alo03")
-                    # label = self._safe_get_label(hit.get('entity', {}))
-                    stored_color, stored_bbox = hit['object_color'], hit['object_bbox']
 
-                    for query_color, query_bbox in queries:
-                        rgb = self._rgb_to_lab(query_color)
-                        delta_e = None
-                        iou = None
+                    # filter phạm vi search vào đúng các object thuộc keyframe này
+                    expr = f"object_id in [{','.join(map(str, obj_ids))}]"
+                    obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, top_k * 10, expr=expr)
+                    ic(obj_hits)
+                    # chấm điểm theo màu/bbox
+                    for hit in obj_hits:
+                        ent = hit.get("entity", {})
+                        stored_color = self._split_csv_floats(ent.get("color_lab")) or None  # [L,a,b]
+                        stored_bbox = self._split_csv_floats(ent.get("bbox_xyxy")) or None  # [x1,y1,x2,y2]
 
-                        color_term = 0.0
-                        if query_color is not None and stored_color is not None:
-                            delta_e = self._compare_color(tuple(rgb), tuple(stored_color))
-                            color_term = 0.1 * (1.0 / (1.0 + float(delta_e)))
+                        for query_color, query_bbox in queries:
+                            rgb = self._rgb_to_lab(query_color) if query_color is not None else None
+                            delta_e = None
+                            iou = None
 
-                        bbox_term = 0.0
-                        if query_bbox is not None and stored_bbox is not None:
-                            ic(tuple(query_bbox), tuple(stored_bbox))
-                            iou = self._compare_bbox(tuple(query_bbox), tuple(stored_bbox))  # 0..1
-                            ic(iou)
-                            bbox_term = 0.2 * float(iou)
-                        ic(color_term, bbox_term)
-                        score_boost = color_term + bbox_term
-                        if score_boost > 0:
-                            candidate_info[kf_id]['score'] += score_boost
-                            candidate_info[kf_id]['reasons'].append(
-                                f"Object match: '{obj}'"
-                                + (f", ΔE={color_term:.3f}" if delta_e is not None else "")
-                                + (f", IoU={bbox_term:.3f}" if iou is not None else "")
-                            )
+                            color_term = 0.0
+                            if rgb is not None and stored_color is not None and len(stored_color) == 3:
+                                delta_e = self._compare_color(tuple(rgb), tuple(stored_color))
+                                color_term = 0.1 * (1.0 / (1.0 + float(delta_e)))
+
+                            bbox_term = 0.0
+                            if query_bbox is not None and stored_bbox is not None and len(stored_bbox) == 4:
+                                iou = self._compare_bbox(tuple(query_bbox), tuple(stored_bbox))
+                                bbox_term = 0.2 * float(iou)
+
+                            score_boost = color_term + bbox_term
+                            if score_boost > 0:
+                                info["score"] += score_boost
+                                info.setdefault("reasons", []).append(
+                                    f"Object match: '{obj_label}'"
+                                    + (f", ΔE→+{color_term:.3f}" if delta_e is not None else "")
+                                    + (f", IoU→+{bbox_term:.3f}" if iou is not None else "")
+                                )
 
         # # ===== COLOR FILTERS (độc lập) =====
         # if color_filters and 0:

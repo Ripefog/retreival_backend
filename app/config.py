@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # --- Search Configuration ---
-    DEFAULT_TOP_K: int = 100
-    MAX_TOP_K: int = 1000
+    DEFAULT_TOP_K: int = 10
+    MAX_TOP_K: int = 100
     
     # --- API Configuration ---
     API_HOST: str = "0.0.0.0"
