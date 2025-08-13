@@ -416,7 +416,7 @@ class HybridRetriever:
         if mode == 'hybrid' and candidate_info:
             # ic("trước:::::::: ", candidate_info)
             self._hybrid_reranking(candidate_info, text_query)
-            # ic("sau:::::::: ", candidate_info)
+            ic("sau:::::::: ", candidate_info)
         # GĐ3: TĂNG ĐIỂM với Object/Color
         if object_filters or color_filters:
             # ic(object_filters)
@@ -436,12 +436,12 @@ class HybridRetriever:
         return final_results
 
     def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None) -> List[Dict]:
-        ic("alo00", collection_name)
+        # ic("alo00", collection_name)
         # Tải sẵn các collection (idempotent)
         self.db_manager._load_milvus_collections()
 
         collection = self.db_manager.get_collection(collection_name)
-        ic(collection)
+        # ic(collection)
         if not collection:
             return []
 
@@ -461,7 +461,7 @@ class HybridRetriever:
             expr=expr,  # <-- quan trọng: giới hạn theo object_id in [...]
             output_fields=output_fields,
         )[0]
-        ic(collection_name, search_results)
+        # ic(collection_name, search_results)
 
         hits = []
         for hit in search_results:
@@ -611,13 +611,119 @@ class HybridRetriever:
             color_filters: Optional[List[Tuple[float, float, float]]],
             top_k: int
     ):
+        # ====== helpers nội bộ ======
+        import math
+
+        def _split_csv_floats(s: Optional[str]) -> List[float]:
+            if not s:
+                return []
+            out = []
+            for p in s.split(","):
+                p = p.strip()
+                if p == "":
+                    continue
+                try:
+                    out.append(float(p))
+                except ValueError:
+                    pass
+            return out
+
+        def _ensure_lab(c: Optional[Tuple[float, float, float]]):
+            """Nhận (R,G,B) 0..255 hoặc (L,a,b). Nếu có vẻ là RGB → convert sang LAB."""
+            if c is None:
+                return None
+            L, A, B = c
+            # heuristics: nếu tất cả trong [0..255] và có ít nhất 1 > 1 → xem như RGB
+            if 0 <= L <= 255 and 0 <= A <= 255 and 0 <= B <= 255 and (L > 1 or A > 1 or B > 1):
+                return self._rgb_to_lab((int(L), int(A), int(B)))
+            return (float(L), float(A), float(B))  # giả định đã là LAB
+
+        def _sim_from_delta(d: float, sigma: float = 20.0) -> float:
+            """Similarity từ ΔE: exp(-(ΔE/σ)^2)."""
+            return math.exp(- (d / sigma) ** 2)
+
+        def _hungarian_min_cost(cost_matrix: List[List[float]]) -> List[Tuple[int, int]]:
+            """Hungarian tối giản (min-cost). Tự pad ma trận thành vuông."""
+            r = len(cost_matrix)
+            c = len(cost_matrix[0]) if r > 0 else 0
+            n = max(r, c)
+            # cost dummy = 1.0 (tương ứng sim=0) cho ô pad
+            cost = [[1.0 for _ in range(n)] for __ in range(n)]
+            for i in range(r):
+                for j in range(c):
+                    cost[i][j] = float(cost_matrix[i][j])
+
+            u = [0.0] * (n + 1)
+            v = [0.0] * (n + 1)
+            p = [0] * (n + 1)
+            way = [0] * (n + 1)
+
+            for i in range(1, n + 1):
+                p[0] = i
+                j0 = 0
+                minv = [float("inf")] * (n + 1)
+                used = [False] * (n + 1)
+                while True:
+                    used[j0] = True
+                    i0 = p[j0]
+                    delta = float("inf")
+                    j1 = 0
+                    for j in range(1, n + 1):
+                        if not used[j]:
+                            cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                            if cur < minv[j]:
+                                minv[j] = cur
+                                way[j] = j0
+                            if minv[j] < delta:
+                                delta = minv[j]
+                                j1 = j
+                    for j in range(0, n + 1):
+                        if used[j]:
+                            u[p[j]] += delta
+                            v[j] -= delta
+                        else:
+                            minv[j] -= delta
+                    j0 = j1
+                    if p[j0] == 0:
+                        break
+                while True:
+                    j1 = way[j0]
+                    p[j0] = p[j1]
+                    j0 = j1
+                    if j0 == 0:
+                        break
+
+            assignment = []
+            for j in range(1, n + 1):
+                i = p[j]
+                if i != 0:
+                    assignment.append((i - 1, j - 1))
+            return assignment
+
+        # ====== tham số scoring ======
+        # trọng số gốc cho từng thành phần (sẽ re-normalize theo query có gì)
+        W_VEC = 0.6
+        W_COLOR = 0.3
+        W_BBOX = 0.4
+        # tham số color
+        SIGMA_COLOR = 20.0  # cho similarity exp(-(ΔE/σ)^2)
+        MAX_DELTA_E = 50.0  # gate: nếu ΔE > ngưỡng → coi như 0
+        # tham số bbox
+        MIN_IOU = 0.10  # gate: IoU >= 0.10 mới tính điểm bbox
+        # kết hợp assignment & coverage
+        ALPHA = 0.7
+        BETA = 0.3
+        TAU_S = 0.5  # ngưỡng S_ij để tính "covered"
+        # trọng số boost vào tổng score keyframe
+        W_OBJ = 0.20
+
         # ===== OBJECT FILTERS =====
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
             ic(norm_object_filters)
 
             for obj_label, queries in norm_object_filters.items():
-                # vector của nhãn cần tìm
+                # vector của nhãn cần tìm (chung cho các truy vấn con của label này)
                 obj_vector = self.get_clip_text_embedding(obj_label).tolist()
 
                 # duyệt từng keyframe ứng viên
@@ -626,68 +732,257 @@ class HybridRetriever:
                     if not obj_ids:
                         continue
 
-                    # filter phạm vi search vào đúng các object thuộc keyframe này
+                    # lấy toàn bộ object của frame này
                     expr = f"object_id in [{','.join(map(str, obj_ids))}]"
-                    obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, top_k * 10, expr=expr)
-                    ic(obj_hits)
-                    # chấm điểm theo màu/bbox
-                    for hit in obj_hits:
-                        ent = hit.get("entity", {})
-                        stored_color = self._split_csv_floats(ent.get("color_lab")) or None  # [L,a,b]
-                        stored_bbox = self._split_csv_floats(ent.get("bbox_xyxy")) or None  # [x1,y1,x2,y2]
+                    limit = max(len(obj_ids), 1)
+                    obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, limit, expr=expr)
+                    if not obj_hits:
+                        continue
 
-                        for query_color, query_bbox in queries:
-                            rgb = self._rgb_to_lab(query_color) if query_color is not None else None
-                            delta_e = None
-                            iou = None
+                    # chuẩn bị m (số query con) & n (số object thật)
+                    # mỗi query: (query_color_lab | None, query_bbox | None)
+                    Q = []
+                    for (q_color, q_bbox) in queries:
+                        q_lab = _ensure_lab(q_color) if q_color is not None else None
+                        q_bb = tuple(q_bbox) if q_bbox is not None else None
+                        Q.append((q_lab, q_bb))
+                    m = len(Q)
+                    if m == 0:
+                        continue
 
-                            color_term = 0.0
-                            if rgb is not None and stored_color is not None and len(stored_color) == 3:
-                                delta_e = self._compare_color(tuple(rgb), tuple(stored_color))
-                                color_term = 0.1 * (1.0 / (1.0 + float(delta_e)))
+                    # parse hits (mảng per object)
+                    O_vec_sim = []  # vector similarity theo hit.distance
+                    O_color_lab = []  # [L,a,b] hoặc None
+                    O_bbox = []  # [x1,y1,x2,y2] hoặc None
+                    for h in obj_hits:
+                        ent = h.get("entity", {})
+                        # vector similarity từ distance: 1/(1+d)
+                        d = float(h.get("distance", 0.0))
+                        s_vec = 1.0 / (1.0 + d)
+                        O_vec_sim.append(s_vec)
+                        # parse màu & bbox
+                        cl = _split_csv_floats(ent.get("color_lab"))
+                        bl = _split_csv_floats(ent.get("bbox_xyxy"))
+                        O_color_lab.append(cl if len(cl) == 3 else None)
+                        O_bbox.append(tuple(bl) if len(bl) == 4 else None)
 
-                            bbox_term = 0.0
-                            if query_bbox is not None and stored_bbox is not None and len(stored_bbox) == 4:
-                                iou = self._compare_bbox(tuple(query_bbox), tuple(stored_bbox))
-                                bbox_term = 0.2 * float(iou)
+                    n = len(O_vec_sim)
+                    if n == 0:
+                        continue
 
-                            score_boost = color_term + bbox_term
-                            if score_boost > 0:
-                                info["score"] += score_boost
-                                info.setdefault("reasons", []).append(
-                                    f"Object match: '{obj_label}'"
-                                    + (f", ΔE→+{color_term:.3f}" if delta_e is not None else "")
-                                    + (f", IoU→+{bbox_term:.3f}" if iou is not None else "")
-                                )
+                    # xây ma trận similarity S_ij (m x n)
+                    S = [[0.0 for _ in range(n)] for __ in range(m)]
+                    for i in range(m):
+                        q_lab, q_bb = Q[i]
+                        # xác định các thành phần có mặt
+                        use_vec = True  # vector luôn có (do từ search)
+                        use_color = (q_lab is not None)
+                        use_bbox = (q_bb is not None)
 
-        # # ===== COLOR FILTERS (độc lập) =====
-        # if color_filters and 0:
-        #     for query_color in color_filters:
-        #         if query_color is None:
-        #             continue
-        #
-        #         color_hits = self._search_milvus(settings.COLOR_COLLECTION, list(query_color), top_k * 10)
-        #
-        #         for hit in color_hits:
-        #             label = self._safe_get_label(hit.get('entity', {}))
-        #             if not label:
-        #                 continue
-        #
-        #             stored_color, _ = self._parse_color_bbox_from_label(label)
-        #             if stored_color is None:
-        #                 continue
-        #
-        #             delta_e = self._compare_color(tuple(query_color), tuple(stored_color))
-        #
-        #             kf_id_parts = hit['id'].split('_')
-        #             kf_id = '_'.join(kf_id_parts[:-2]) if len(kf_id_parts) > 2 else hit['id']
-        #
-        #             if kf_id in candidate_info:
-        #                 score_boost = max(0.0, 0.1 * (1.0 / (1.0 + float(delta_e))))
-        #                 candidate_info[kf_id]['score'] += score_boost
-        #                 candidate_info[kf_id]['reasons'].append(
-        #                     f"Color match: ΔE={score_boost:.3f} với query {tuple(query_color)}"
-        #                 )
+                        # re-normalize trọng số theo phần có mặt
+                        w_sum = 0.0
+                        wv = W_VEC if use_vec else 0.0
+                        wc = W_COLOR if use_color else 0.0
+                        wb = W_BBOX if use_bbox else 0.0
+                        w_sum = wv + wc + wb
+                        if w_sum == 0:
+                            # không có tín hiệu gì (trường hợp hiếm) → bỏ qua query này
+                            continue
+                        wv /= w_sum;
+                        wc /= w_sum;
+                        wb /= w_sum
+
+                        for j in range(n):
+                            s_total = 0.0
+
+                            # vector sim
+                            s_total += wv * O_vec_sim[j]
+
+                            # color sim
+                            if use_color:
+                                p_lab = O_color_lab[j]
+                                if p_lab is not None:
+                                    de = self._compare_color(q_lab, tuple(p_lab))  # ΔE2000
+                                    if de <= MAX_DELTA_E:
+                                        s_col = _sim_from_delta(de, SIGMA_COLOR)
+                                        s_total += wc * s_col
+                                    else:
+                                        # gate out nếu quá khác
+                                        pass
+
+                            # bbox sim
+                            if use_bbox:
+                                p_bb = O_bbox[j]
+                                if p_bb is not None:
+                                    iou = float(self._compare_bbox(q_bb, p_bb))
+                                    if iou >= MIN_IOU:
+                                        s_total += wb * iou
+                                    else:
+                                        pass
+
+                            S[i][j] = s_total
+
+                    # Hungarian: cost = 1 - S
+                    cost = [[1.0 - S[i][j] for j in range(n)] for i in range(m)]
+                    assignment = _hungarian_min_cost(cost)  # list of (i,j) theo ma trận pad
+
+                    # tổng hợp điểm cho keyframe: S_match & coverage
+                    sim_sum = 0.0
+                    match_pairs = 0
+                    covered = 0
+                    for (i, j) in assignment:
+                        if i < m and j < n:
+                            sij = S[i][j]
+                            sim_sum += sij
+                            match_pairs += 1
+                            if sij >= TAU_S:
+                                covered += 1
+
+                    # Chuẩn hoá theo số query (m) để công bằng
+                    S_match = (sim_sum / m) if m > 0 else 0.0
+                    C = (covered / m) if m > 0 else 0.0
+                    S_obj = ALPHA * S_match + BETA * C
+                    boost = W_OBJ * S_obj
+
+                    if boost > 0:
+                        info["score"] += boost
+                        info.setdefault("reasons", []).append(
+                            f"Object match: '{obj_label}' +{boost:.3f} (S={S_obj:.3f}, cov={C:.2f})"
+                        )
+
+        # ===== COLOR FILTERS (độc lập) =====
+        if color_filters:
+            # 1) Chuẩn bị: RGB -> LAB cho toàn bộ màu truy vấn
+            queries_lab = []
+            for qc in color_filters:
+                if qc is None:
+                    continue
+                # qc có dạng [R,G,B] hoặc tuple
+                queries_lab.append(self._rgb_to_lab(tuple(qc)))
+            if not queries_lab:
+                pass  # không có màu truy vấn thì bỏ qua
+            else:
+                import math
+
+                # Gaussian similarity từ ΔE (CIEDE2000)
+                def _sim_from_delta(d, sigma=20.0):
+                    return math.exp(- (d / sigma) ** 2)
+
+                # Hungarian (min-cost) cho ma trận vuông; tự pad nếu hình chữ nhật
+                def _hungarian_min_cost(cost_matrix):
+                    # Pad thành vuông
+                    r = len(cost_matrix)
+                    c = len(cost_matrix[0]) if r > 0 else 0
+                    n = max(r, c)
+                    # dùng cost_dummy=1.0 (tương ứng sim=0) cho ô trống
+                    cost = [[1.0 for _ in range(n)] for __ in range(n)]
+                    for i in range(r):
+                        for j in range(c):
+                            cost[i][j] = float(cost_matrix[i][j])
+
+                    # Thuật toán Hungarian (phiên bản ngắn gọn)
+                    u = [0.0] * (n + 1)
+                    v = [0.0] * (n + 1)
+                    p = [0] * (n + 1)
+                    way = [0] * (n + 1)
+
+                    for i in range(1, n + 1):
+                        p[0] = i
+                        j0 = 0
+                        minv = [float("inf")] * (n + 1)
+                        used = [False] * (n + 1)
+                        while True:
+                            used[j0] = True
+                            i0 = p[j0]
+                            delta = float("inf")
+                            j1 = 0
+                            for j in range(1, n + 1):
+                                if not used[j]:
+                                    cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                                    if cur < minv[j]:
+                                        minv[j] = cur
+                                        way[j] = j0
+                                    if minv[j] < delta:
+                                        delta = minv[j]
+                                        j1 = j
+                            for j in range(0, n + 1):
+                                if used[j]:
+                                    u[p[j]] += delta
+                                    v[j] -= delta
+                                else:
+                                    minv[j] -= delta
+                            j0 = j1
+                            if p[j0] == 0:
+                                break
+                        # rebuild matching
+                        while True:
+                            j1 = way[j0]
+                            p[j0] = p[j1]
+                            j0 = j1
+                            if j0 == 0:
+                                break
+
+                    # Kết quả: ghép i->j
+                    assignment = []
+                    # p[j] = i  (hàng i gán cho cột j)
+                    for j in range(1, n + 1):
+                        i = p[j]
+                        if i != 0:
+                            assignment.append((i - 1, j - 1))
+                    return assignment  # list[(row_idx, col_idx)]
+
+                # 2) Chấm điểm theo Hungarian cho từng keyframe
+                alpha, beta = 0.7, 0.3  # trọng số kết hợp sim & coverage
+                w_color = 0.15  # trọng số boost vào tổng điểm
+                tau = 15.0  # ngưỡng coverage (ΔE <= tau)
+                for kf_id, info in candidate_info.items():
+                    palette = info.get("lab_colors6") or []  # list[(L,a,b), ...] (tối đa 6)
+                    if not palette:
+                        continue
+
+                    m = len(queries_lab)
+                    n = len(palette)
+
+                    # Xây cost matrix = 1 - sim(ΔE) (minimize cost = maximize sim)
+                    cost = []
+                    for i in range(m):
+                        row = []
+                        for j in range(n):
+                            d = self._compare_color(queries_lab[i], palette[j])  # ΔE2000
+                            s = _sim_from_delta(d)
+                            row.append(1.0 - s)
+                        cost.append(row)
+
+                    # Hungarian cho kích thước min(m,n) (pad nội bộ)
+                    assignment = _hungarian_min_cost(cost)  # (i,j) theo ma trận pad
+
+                    # Tính sim trung bình trên các cặp thực (i<m, j<n)
+                    sim_sum = 0.0
+                    real_pairs = 0
+                    for i, j in assignment:
+                        if i < m and j < n:
+                            d = self._compare_color(queries_lab[i], palette[j])
+                            sim_sum += _sim_from_delta(d)
+                            real_pairs += 1
+                    # Chuẩn hoá theo số màu query để không ưu tiên frame “ít bị ghép”
+                    S_hung = (sim_sum / m) if m > 0 else 0.0
+
+                    # Coverage: tỉ lệ màu query “gần” một màu palette (ΔE <= tau)
+                    covered = 0
+                    for i in range(m):
+                        best_d = min(self._compare_color(queries_lab[i], p) for p in palette)
+                        if best_d <= tau:
+                            covered += 1
+                    C = (covered / m) if m > 0 else 0.0
+
+                    S_color = alpha * S_hung + beta * C
+                    boost = w_color * S_color
+
+                    if boost > 0:
+                        info["score"] += boost
+                        info.setdefault("reasons", []).append(
+                            f"Color match (Hungarian): +{boost:.3f} (S={S_color:.3f}, cov={C:.2f})"
+                        )
 
     def _apply_text_filters(self, candidate_info: Dict, ocr_kf_ids: Optional[Set[str]], asr_video_ids: Optional[Set[str]]) -> Dict:
         if not ocr_kf_ids and not asr_video_ids: return candidate_info
