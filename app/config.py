@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
-    OCR_INDEX: str = 'ocr_v2'
-    ASR_INDEX: str = 'video_transcripts_v2'
+    OCR_INDEX: str = 'ocr_v6'
+    ASR_INDEX: str = 'video_transcripts_v6'
     
     # --- Model Paths ---
     # Đường dẫn có thể là tuyệt đối (container) hoặc tương đối (local)
