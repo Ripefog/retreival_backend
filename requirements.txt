@@ -32,6 +32,8 @@ scikit-learn
 opencv-python-headless # Dùng bản headless vì không cần GUI
 pillow
 colormath
+rapidfuzz>=3.9.0
+
 # Libraries from notebook (ít quan trọng hơn)
 moviepy
 nbimporter

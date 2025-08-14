@@ -33,7 +33,7 @@ from icecream import ic
 from .config import settings
 from .database import db_manager
 import numpy as np
-
+from rapidfuzz import fuzz
 if not hasattr(np, "asscalar"): np.asscalar = lambda a: a.item() if hasattr(a, "item") else np.asarray(a).item()
 
 logger = logging.getLogger(__name__)
@@ -1076,6 +1076,76 @@ class HybridRetriever:
                             f"Color match (Hungarian): +{boost:.3f} (S={S_color:.3f}, cov={C:.2f})"
                         )
 
+    # def _apply_ocr_filter_on_candidates(self, candidate_info: Dict, ocr_query: str) -> Dict:
+    #     """
+    #     Áp dụng bộ lọc OCR dựa trên danh sách ứng viên hiện có.
+    #
+    #     Hàm này thực hiện các bước sau:
+    #     1. Lấy tất cả keyframe_id từ các ứng viên đầu vào.
+    #     2. Gửi MỘT truy vấn duy nhất đến Elasticsearch để lấy văn bản OCR cho TẤT CẢ các keyframe đó.
+    #     3. Lặp qua từng ứng viên, so sánh văn bản OCR của nó với ocr_query.
+    #     4. Nếu khớp, tăng điểm và ghi lại lý do.
+    #     5. Trả về danh sách ứng viên đã được cập nhật điểm.
+    #     """
+    #     if not ocr_query or not candidate_info:
+    #         return candidate_info
+    #
+    #     es_client = self.db_manager.es_client
+    #     if not es_client:
+    #         logger.error("Elasticsearch client không khả dụng. Bỏ qua bộ lọc OCR.")
+    #         return candidate_info
+    #
+    #     kf_ids_to_fetch = list(candidate_info.keys())
+    #     logger.debug(f"Chuẩn bị áp dụng bộ lọc OCR cho {len(kf_ids_to_fetch)} ứng viên.")
+    #
+    #     ocr_texts_from_es = {}
+    #     try:
+    #         ic(f"ES: Lấy văn bản OCR cho {len(kf_ids_to_fetch)} keyframes.")
+    #         res = es_client.search(
+    #             index=settings.OCR_INDEX,
+    #             body={
+    #                 "query": {
+    #                     # === SỬA ĐỔI QUAN TRỌNG NHẤT NẰM Ở ĐÂY ===
+    #                     # Bỏ ".keyword" vì mapping đã định nghĩa trường là "keyword"
+    #                     "terms": {"keyframe_id": kf_ids_to_fetch}
+    #                 },
+    #                 "_source": ["keyframe_id", "text"],
+    #                 "size": len(kf_ids_to_fetch)
+    #             }
+    #         )
+    #
+    #         for hit in res['hits']['hits']:
+    #             source = hit.get('_source', {})
+    #             kf_id = source.get('keyframe_id')
+    #             text = source.get('text')
+    #             if kf_id and text:
+    #                 ocr_texts_from_es[kf_id] = text
+    #         ic(f"ES: Tìm thấy văn bản cho {len(ocr_texts_from_es)}/{len(kf_ids_to_fetch)} keyframes.")
+    #
+    #     except Exception as e:
+    #         logger.error(f"ES OCR search để lấy văn bản thất bại: {e}", exc_info=True)
+    #         return candidate_info
+    #
+    #     matched_count = 0
+    #     for kf_id, info in candidate_info.items():
+    #         ocr_text = ocr_texts_from_es.get(kf_id)
+    #
+    #         if ocr_text:
+    #             if ocr_query.lower() in ocr_text.lower():
+    #                 info['score'] += 0.5
+    #                 info['reasons'].append("OCR match")
+    #                 matched_count += 1
+    #
+    #     logger.info(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
+    #     ic(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
+    #
+    #     return candidate_info
+
+    def _normalize_text(self, s: str) -> str:
+        # đủ dùng: lower + strip + rút gọn khoảng trắng
+        # (nếu cần bóc dấu thì thêm unidecode, nhưng bạn bảo chỉ thêm rapidfuzz nên mình giữ tối thiểu)
+        return " ".join((s or "").lower().split())
+
     def _apply_ocr_filter_on_candidates(self, candidate_info: Dict, ocr_query: str) -> Dict:
         """
         Áp dụng bộ lọc OCR dựa trên danh sách ứng viên hiện có.
@@ -1105,7 +1175,6 @@ class HybridRetriever:
                 index=settings.OCR_INDEX,
                 body={
                     "query": {
-                        # === SỬA ĐỔI QUAN TRỌNG NHẤT NẰM Ở ĐÂY ===
                         # Bỏ ".keyword" vì mapping đã định nghĩa trường là "keyword"
                         "terms": {"keyframe_id": kf_ids_to_fetch}
                     },
@@ -1126,19 +1195,31 @@ class HybridRetriever:
             logger.error(f"ES OCR search để lấy văn bản thất bại: {e}", exc_info=True)
             return candidate_info
 
+        # Ngưỡng fuzzy (có thể điều chỉnh nếu cần, giữ nguyên hành vi cộng điểm khi đạt ngưỡng)
+        FUZZ_THRESHOLD = 70  # hạ ngưỡng để phù hợp partial/token_set
+        q = self._normalize_text(ocr_query)
+
         matched_count = 0
         for kf_id, info in candidate_info.items():
             ocr_text = ocr_texts_from_es.get(kf_id)
+            if not ocr_text:
+                continue
 
-            if ocr_text:
-                if ocr_query.lower() in ocr_text.lower():
-                    info['score'] += 0.5
-                    info['reasons'].append("OCR match")
-                    matched_count += 1
+            t = self._normalize_text(ocr_text)
+
+            # Dùng các scorer phù hợp với case "query ngắn" vs "văn bản dài"
+            score_partial = fuzz.partial_ratio(q, t)
+            score_token_set = fuzz.token_set_ratio(q, t)
+            score_token_sort = fuzz.token_sort_ratio(q, t)  # tùy chọn
+            score = max(score_partial, score_token_set, score_token_sort)
+
+            if score >= FUZZ_THRESHOLD:
+                info['score'] += 0.5
+                info['reasons'].append(f"OCR fuzzy match (score={int(score)})")
+                matched_count += 1
 
         logger.info(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
         ic(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
-
         return candidate_info
 
     def _format_results(self, sorted_candidates: List[Tuple[str, Dict]]) -> List[Dict]:
