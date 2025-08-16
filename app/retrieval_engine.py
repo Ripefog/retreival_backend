@@ -29,8 +29,8 @@ from colormath.color_objects import sRGBColor, LabColor
 from colormath.color_conversions import convert_color
 from colormath.color_diff import delta_e_cie2000
 # Import từ các module của ứng dụng
-from config import settings
-from database import db_manager
+from .config import settings
+from .database import db_manager
 
 logger = logging.getLogger(__name__)
 

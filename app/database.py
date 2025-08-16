@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Any, Optional
 from pymilvus import connections, Collection, utility
 from opensearchpy import OpenSearch, NotFoundError
-from config import settings
+from .config import settings
 
 logger = logging.getLogger(__name__)
 

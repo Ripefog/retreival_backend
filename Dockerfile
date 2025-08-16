@@ -47,36 +47,20 @@ RUN wget https://github.com/addf400/files/releases/download/beit3/beit3_base_pat
 # [CẬP NHẬT] Tải model Co-DETR từ Google Drive bằng gdown với File ID mới
 # File ID mới: 1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO
 RUN gdown '1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO' -O /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth
-# --- Download keyframes (30v.zip) from Google Drive via gdown and unzip ---
-# File ID lấy từ link của bạn
-ARG KEYFRAMES_ID=1b1YJcWW8q7m-8f9WS71p9j2yqPjXQ5uD
-ARG KEYFRAMES_DIR=/data/30v
-
-# Cần unzip để giải nén
-RUN apt-get update && apt-get install -y --no-install-recommends unzip && \
-    rm -rf /var/lib/apt/lists/*
-
-# Tải 30v.zip và giải nén vào KEYFRAMES_DIR
-RUN mkdir -p "${KEYFRAMES_DIR}" && \
-    gdown --id "${KEYFRAMES_ID}" -O /tmp/30v.zip && \
-    unzip -q /tmp/30v.zip -d "${KEYFRAMES_DIR}" && \
-    rm -f /tmp/30v.zip
-
-# (tuỳ chọn) cho app biết nơi chứa keyframes
-ENV KEYFRAME_ROOT_DIR=${KEYFRAMES_DIR}
+RUN pip install --no-cache-dir --upgrade "pip<24" "setuptools==59.5.0" "wheel<0.41" "packaging==21.3"
 
 # --- Cài đặt Co-DETR ---
 RUN git clone https://github.com/Sense-X/Co-DETR.git /app/Co-DETR-temp && \
     pip install --no-cache-dir "packaging>=20.0" && \
     pip install --no-cache-dir -e /app/Co-DETR-temp && \
     mv /app/Co-DETR-temp /app/Co_DETR && \
-    pip install --no-cache-dir timm==0.4.12 "setuptools<58.0.0"
+    pip install --no-cache-dir timm==0.4.12
 
 # --- Cài đặt BEiT-3 ---
 RUN git clone https://github.com/microsoft/unilm.git /app/unilm && \
     pip install --no-cache-dir -r /app/unilm/beit3/requirements.txt && \
     pip uninstall -y protobuf && pip install --no-cache-dir protobuf==3.20.3
-
+RUN pip install icecream
 # ==============================================================================
 # STAGE 3: Cấu hình và chạy ứng dụng
 # ==============================================================================
