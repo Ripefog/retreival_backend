@@ -1160,25 +1160,26 @@ class HybridRetriever:
         ocr_texts_from_es = {}
         try:
             ic(f"ES: Lấy văn bản OCR cho {len(kf_ids_to_fetch)} keyframes.")
-            res = es_client.search(
-                index=settings.OCR_INDEX,
-                body={
-                    "query": {
-                        # Bỏ ".keyword" vì mapping đã định nghĩa trường là "keyword"
-                        "terms": {"keyframe_id": kf_ids_to_fetch}
-                    },
-                    "_source": ["keyframe_id", "text"],
-                    "size": len(kf_ids_to_fetch)
-                }
-            )
-
-            for hit in res['hits']['hits']:
-                source = hit.get('_source', {})
-                kf_id = source.get('keyframe_id')
-                text = source.get('text')
-                if kf_id and text:
-                    ocr_texts_from_es[kf_id] = text
-            ic(f"ES: Tìm thấy văn bản cho {len(ocr_texts_from_es)}/{len(kf_ids_to_fetch)} keyframes.")
+            #cmt elastic
+            # res = es_client.search(
+            #     index=settings.OCR_INDEX,
+            #     body={
+            #         "query": {
+            #             # Bỏ ".keyword" vì mapping đã định nghĩa trường là "keyword"
+            #             "terms": {"keyframe_id": kf_ids_to_fetch}
+            #         },
+            #         "_source": ["keyframe_id", "text"],
+            #         "size": len(kf_ids_to_fetch)
+            #     }
+            # )
+            #
+            # for hit in res['hits']['hits']:
+            #     source = hit.get('_source', {})
+            #     kf_id = source.get('keyframe_id')
+            #     text = source.get('text')
+            #     if kf_id and text:
+            #         ocr_texts_from_es[kf_id] = text
+            # ic(f"ES: Tìm thấy văn bản cho {len(ocr_texts_from_es)}/{len(kf_ids_to_fetch)} keyframes.")
 
         except Exception as e:
             logger.error(f"ES OCR search để lấy văn bản thất bại: {e}", exc_info=True)
