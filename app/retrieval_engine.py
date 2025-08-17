@@ -250,6 +250,7 @@ class HybridRetriever:
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
+        return None
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
         with torch.no_grad():
@@ -260,33 +261,15 @@ class HybridRetriever:
             _, text_emb = self.beit3_model(text_description=text_ids_tensor, text_padding_mask=text_padding_mask_tensor,
                                            only_infer=True)
             return text_emb.cpu().numpy()[0]
-
-    # def _fix_numpy(self):
-    #     file_path = "/usr/local/lib/python3.8/dist-packages/colormath/color_diff.py"
-    #
-    #     # Đọc nội dung file
-    #     with open(file_path, 'r') as f:
-    #         content = f.read()
-    #
-    #     # Thay thế dòng bị lỗi
-    #     content = content.replace('numpy.asscalar(delta_e)', 'delta_e.item()')
-    #
-    #     # Ghi lại nội dung đã sửa
-    #     with open(file_path, 'w') as f:
-    #         f.write(content)
+        return None
 
     def _compare_color(self, color1, color2):
         """So sánh hai màu sắc CIELAB bằng CIEDE2000."""
         color1_lab = LabColor(*color1)  # color1 là tuple (L, A, B)
         color2_lab = LabColor(*color2)  # color2 là tuple (L, A, B)
-        # try:
         delta_e = delta_e_cie2000(color1_lab, color2_lab)
         return delta_e
-        # except AttributeError as e:
-        #     if "asscalar" in str(e):
-        #         self._fix_numpy()
-        #         delta_e = delta_e_cie2000(color1_lab, color2_lab)
-        #         return delta_e
+
 
     # @staticmethod
     def _compare_bbox(self, bbox1, bbox2):
@@ -298,7 +281,6 @@ class HybridRetriever:
         x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
         y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
         intersection = x_overlap * y_overlap
-        # ic(x_overlap, y_overlap)
         # Tính diện tích của mỗi bbox
         area1 = (x1_max - x1_min) * (y1_max - y1_min)
         area2 = (x2_max - x2_min) * (y2_max - y2_min)
@@ -306,7 +288,6 @@ class HybridRetriever:
         # Tính IoU
         union = area1 + area2 - intersection
         iou = intersection / union if union > 0 else 0
-        # ic(union, intersection, iou)
         return iou
 
     def _parse_video_id_from_kf(self, kf: str):
@@ -391,7 +372,7 @@ class HybridRetriever:
         return lab6
 
     # --- LOGIC TÌM KIẾM CHÍNH ---
-    def search(self, text_query: str, mode: str, object_filters: Optional[List[str]],
+    def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[List[str]],
                color_filters: Optional[List[str]],
                ocr_query: Optional[str], asr_query: Optional[str], top_k: int) -> List[Dict[str, Any]]:
         if not self.initialized: raise RuntimeError("Retriever is not initialized.")
@@ -403,17 +384,20 @@ class HybridRetriever:
         # GĐ1: LẤY ỨNG VIÊN BAN ĐẦU
         if mode in ['hybrid', 'clip']:
             clip_vector = self.get_clip_text_embedding(text_query).tolist()
-            clip_candidates = self._search_milvus(settings.CLIP_COLLECTION, clip_vector, num_initial_candidates)
+            clip_candidates = self._search_milvus(settings.CLIP_COLLECTION, clip_vector, num_initial_candidates, None, user_query)
             ic("********************************************************************************")
             # ic(clip_candidates)
             for hit in clip_candidates:
                 kf_id = hit["entity"]["keyframe_id"]
+                ic(hit)
+                user = hit["entity"]["user"].split(",")
                 vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
                 obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
                 lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
                 candidate_info[kf_id] = {
                     "keyframe_id": kf_id,
+                    "user": user,
                     "timestamp": hit['entity']['timestamp'],
                     "object_ids": obj_ids,  # list[int]
                     "lab_colors6": lab6,  # [(L,a,b)*6]
@@ -423,12 +407,13 @@ class HybridRetriever:
                 }
         elif mode == 'beit3':
             beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
-            beit3_candidates = self._search_milvus(settings.BEIT3_COLLECTION, beit3_vector, num_initial_candidates)
+            beit3_candidates = self._search_milvus(settings.BEIT3_COLLECTION, beit3_vector, num_initial_candidates, None, user_query)
             ic("************** BEIT3 **************")
             # ic(beit3_candidates)
 
             for hit in beit3_candidates:
                 kf_id = hit["entity"]["keyframe_id"]
+                user_db = hit["entity"]["user"]
                 vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
                 obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
@@ -450,6 +435,7 @@ class HybridRetriever:
                     # chưa có → tạo mới entry
                     candidate_info[kf_id] = {
                         "keyframe_id": kf_id,
+                        "user": user,
                         "timestamp": hit["entity"]['timestamp'],
                         "object_ids": obj_ids,  # list[int]
                         "lab_colors6": lab6,  # [(L,a,b)*6]
@@ -480,7 +466,7 @@ class HybridRetriever:
         logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
         return final_results
 
-    def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None) -> List[
+    def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None, user_query: str = "") -> List[
         Dict]:
         # ic("alo00", collection_name)
         # Tải sẵn các collection (idempotent)
@@ -493,7 +479,7 @@ class HybridRetriever:
 
         # Chọn output_fields theo collection
         if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
-            output_fields = ["keyframe_id", "timestamp", "object_ids", "lab_colors"]
+            output_fields = ["keyframe_id", "timestamp", "object_ids", "lab_colors", "user"]
         elif collection_name == settings.OBJECT_COLLECTION:
             output_fields = ["object_id", "bbox_xyxy", "color_lab"]
         else:
@@ -507,12 +493,14 @@ class HybridRetriever:
             expr=expr,  # <-- quan trọng: giới hạn theo object_id in [...]
             output_fields=output_fields,
         )[0]
-        # ic(collection_name, search_results)
+        ic(collection_name, search_results)
 
         hits = []
         for hit in search_results:
             hit_data = hit.entity.to_dict()["entity"]
-
+            user_db = hit_data.get("user") or ""
+            if user_query and user_query not in user_db.split(","):
+                continue
             if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
                 raw_kf = hit_data.get("keyframe_id", "")
                 if isinstance(raw_kf, str):
@@ -529,6 +517,7 @@ class HybridRetriever:
                     "distance": hit.distance,
                     "entity": {
                         "keyframe_id": kf_normalized,
+                        # "user": hit_data.get("user"),
                         "timestamp": hit_data.get("timestamp"),
                         "object_ids": hit_data.get("object_ids"),  # CSV string
                         "lab_colors": hit_data.get("lab_colors"),  # CSV string

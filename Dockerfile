@@ -34,7 +34,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN pip install --no-cache-dir torch==1.9.0+cu111 torchvision==0.10.0+cu111 torchaudio==0.9.0 -f https://download.pytorch.org/whl/torch_stable.html
 RUN pip install --no-cache-dir detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.9/index.html
-RUN pip install --no-cache-dir mmcv-full==1.7.0 -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.9.0/index.html
+COPY mmcv_full-1.7.0-cp38-cp38-manylinux1_x86_64.whl /tmp/mmcv_full-1.7.0-cp38-cp38-manylinux1_x86_64.whl
+
+# Cài đặt mmcv-full từ wheel và xoá file sau khi cài
+RUN pip install --no-cache-dir /tmp/mmcv_full-1.7.0-cp38-cp38-manylinux1_x86_64.whl \
+    && rm -f /tmp/mmcv_full-1.7.0-cp38-cp38-manylinux1_x86_64.whl
 
 # --- Tải xuống TẤT CẢ các model cần thiết ---
 RUN mkdir -p /app/models

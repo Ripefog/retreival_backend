@@ -37,8 +37,8 @@ class DatabaseManager:
             logger.info(f"Connecting to Milvus at {settings.MILVUS_HOST}:{settings.MILVUS_PORT}...")
             connections.connect(
                 alias="default",
-                host="1.53.19.130",
-                port=19530,
+                host="0.tcp.ap.ngrok.io",
+                port=19636,
                 user=settings.MILVUS_USER,
                 password=settings.MILVUS_PASSWORD,
             )

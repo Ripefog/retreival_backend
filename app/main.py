@@ -130,6 +130,7 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
         results = retriever.search(
             text_query=request.text_query,
             mode=request.mode.value,
+            user_query = request.user,
             object_filters=request.object_filters,
             color_filters=request.color_filters,
             ocr_query=request.ocr_query,
