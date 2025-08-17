@@ -89,7 +89,6 @@ class DatabaseManager:
                 settings.CLIP_COLLECTION,
                 settings.BEIT3_COLLECTION,
                 settings.OBJECT_COLLECTION,
-                settings.COLOR_COLLECTION
             ]
             
             for name in collection_names:

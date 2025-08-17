@@ -55,6 +55,7 @@ for person, count in person_counts.items():
     print(f"{person}: {count}")
 
 class Settings(BaseSettings):
+    KEYFRAME_ROOT_DIR: str  = r"/data"
     """
     Quản lý tập trung tất cả các cấu hình cho ứng dụng.
     Sử dụng Pydantic để tự động đọc từ biến môi trường hoặc file .env.
@@ -82,13 +83,12 @@ class Settings(BaseSettings):
     CLIP_COLLECTION: str = 'arch_clip_image_v100'
     BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
     OBJECT_COLLECTION: str = 'arch_object_name_v100'
-    COLOR_COLLECTION: str = 'arch_color_name_v100'
     VIDEO_TO_USER = load_video2user_mapping(filename)
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
     OCR_INDEX: str = 'ocr_v2'
     ASR_INDEX: str = 'video_transcripts_v2'
-    
+
     # --- Model Paths ---
     # Đường dẫn có thể là tuyệt đối (container) hoặc tương đối (local)
     CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "models/clip_model.bin")
@@ -96,7 +96,6 @@ class Settings(BaseSettings):
     BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "models/beit3.spm")
     CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH", "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
     CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH", "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
-    KEYFRAME_ROOT_DIR: str  = r"/data/30v"
     # --- Model & Processing Configuration ---
     # Tự động phát hiện CUDA nếu có, nếu không thì dùng CPU.
     # Không nên set cứng là "cuda", để code tự quyết định sẽ linh hoạt hơn.
@@ -465,3 +464,4 @@ if not settings.check_model_paths():
     logger.warning("One or more model paths are invalid. The application might fail to start.")
 
 # --- END OF FILE app/config.py ---
+
