@@ -390,14 +390,14 @@ class HybridRetriever:
             for hit in clip_candidates:
                 kf_id = hit["entity"]["keyframe_id"]
                 ic(hit)
-                user = hit["entity"]["user"].split(",")
+                # user = hit["entity"]["user"].split(",")
                 vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
                 obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
                 lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
                 candidate_info[kf_id] = {
                     "keyframe_id": kf_id,
-                    "user": user,
+                    # "user": user,
                     "timestamp": hit['entity']['timestamp'],
                     "object_ids": obj_ids,  # list[int]
                     "lab_colors6": lab6,  # [(L,a,b)*6]
