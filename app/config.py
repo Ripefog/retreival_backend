@@ -19,7 +19,7 @@ def load_video2user_mapping(filename):
             video_to_pair[video_id] = persons
     return video_to_pair
 
-filename = "/kaggle/input/video2pair-21-26/video2pair_21_26.txt"
+filename = "/data/data/video2pair_21_26.txt"
 with open(filename, "r", encoding="utf-8") as f:
     lines = f.readlines()
 num_lines = len(lines)
