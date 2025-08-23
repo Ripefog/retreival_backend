@@ -22,14 +22,14 @@ class SearchMode(str, Enum):
 class SearchRequest(BaseModel):
     text_query: str = Field(..., description="Câu truy vấn ngữ nghĩa bằng ngôn ngữ tự nhiên để tìm kiếm video.")
     mode: SearchMode = Field(default=SearchMode.HYBRID, description="Chế độ tìm kiếm để sử dụng.")
-    user_query: str = Field(..., description="Nhập tên nè")
-    object_filters: Optional[Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]] = Field(
+    user_query: Optional[str] = Field(default=None, description="Tên người dùng để lọc kết quả")
+    object_filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Từ điển: tên đối tượng -> danh sách tuple (L, A, B, (xmin, ymin, xmax, ymax)) để tăng điểm ưu tiên."
     )
 
     # màu LAB
-    color_filters: Optional[List[Tuple[float, float, float]]] = Field(
+    color_filters: Optional[List[Any]] = Field(
         default=None,
         description="Danh sách các màu LAB (L, A, B) để tăng điểm ưu tiên."
     )
@@ -70,7 +70,7 @@ search_examples = {
         "value": {
             "text_query": "a person sitting at a desk",
             "mode": "hybrid",
-            "user": "Minh Tâm",
+            "user_query": "Minh Tâm",
             "top_k": 5
         },
     },
@@ -80,7 +80,7 @@ search_examples = {
         "value": {
             "text_query": "a man wearing something blue",
             "mode": "hybrid",
-            "user": "Minh Tâm",
+            "user_query": "Minh Tâm",
             "object_filters": {
                 "person": [
                     ((50.0, -2.0, 12.0), (0, 0, 1920, 1080))
@@ -101,7 +101,7 @@ search_examples = {
         "value": {
             "text_query": "a presenter on stage",
             "mode": "hybrid",
-            "user": "Minh Tâm",
+            "user_query": "Minh Tâm",
             "object_filters": {
                 "person": [
                     ((70.0, 0.0, 0.0), (10, 20, 300, 400))
@@ -124,7 +124,7 @@ search_examples = {
         "value": {
             "text_query": "nữ biên tập viên mặc áo hồng đang dẫn chương trình thời sự",
             "mode": "hybrid",
-            "user": "Minh Tâm",
+            "user_query": "Minh Tâm",
             "object_filters": {
                 "person": [
                     ((60.0, 50.0, 20.0), (0, 0, 1280, 720))

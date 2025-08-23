@@ -34,15 +34,11 @@ class DatabaseManager:
         """Thiết lập kết nối đến máy chủ Milvus."""
         connections.disconnect("default")
         try:
-            logger.info(f"Connecting to Milvus at {settings.MILVUS_HOST}:{settings.MILVUS_PORT}...")
-            connections.connect(
-                alias="default",
-                host="0.tcp.ap.ngrok.io",
-                port=19636,
-                user=settings.MILVUS_USER,
-                password=settings.MILVUS_PASSWORD,
-            )
-            
+            params = settings.get_milvus_connection_params()
+            logger.info(f"Connecting to Milvus at {params['host']}:{params['port']} (User: {params.get('user', 'N/A')})...")
+
+            connections.connect(**params)
+
             if connections.has_connection(settings.MILVUS_ALIAS):
                 self.milvus_connected = True
                 logger.info("✅ Milvus connected.")
@@ -50,26 +46,19 @@ class DatabaseManager:
             else:
                 logger.error("❌ Milvus connection could not be established.")
                 self.milvus_connected = False
-                
+
         except Exception as e:
             logger.error(f"❌ Milvus connection failed with an exception: {e}", exc_info=True)
             self.milvus_connected = False
 
+
     async def connect_elasticsearch(self):
         """Thiết lập kết nối đến máy chủ Elasticsearch/OpenSearch."""
         try:
-            logger.info(f"Connecting to Elasticsearch at {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT}...")
-            hosts = [{'host': settings.ELASTICSEARCH_HOST, 'port': settings.ELASTICSEARCH_PORT}]
-            http_auth = (settings.ELASTICSEARCH_USERNAME, settings.ELASTICSEARCH_PASSWORD) if settings.ELASTICSEARCH_USERNAME else None
+            params = settings.get_elasticsearch_connection_params()
+            logger.info(f"Connecting to Elasticsearch at {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT} (User: {settings.ELASTICSEARCH_USERNAME})...")
 
-            self.es_client = OpenSearch(
-                hosts=hosts,
-                http_auth=http_auth,
-                use_ssl=settings.ELASTICSEARCH_USE_SSL,
-                verify_certs=settings.ELASTICSEARCH_USE_SSL, # Thường thì nên verify certs nếu dùng SSL
-                ssl_assert_hostname=False,
-                ssl_show_warn=False,
-            )
+            self.es_client = OpenSearch(**params)
             
             if self.es_client.ping():
                 self.elasticsearch_connected = True
@@ -81,6 +70,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Elasticsearch connection failed with an exception: {e}", exc_info=True)
             self.elasticsearch_connected = False
+
     
     async def _load_milvus_collections(self):
         """Tải các collection từ Milvus vào bộ nhớ và chuẩn bị chúng cho việc tìm kiếm."""

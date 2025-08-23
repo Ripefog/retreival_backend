@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
 import uvicorn
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -125,9 +125,9 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
     if not retriever: raise HTTPException(status_code=503, detail="Retriever not initialized")
     try:
         logger.info(f"Raw request data: {request}")
-        logger.info(f"Request dict: {request.dict()}")
+        logger.info(f"Request dict: {request.model_dump()}")
         logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}'")
-        results = retriever.search(
+        results = await retriever.search(
             text_query=request.text_query,
             mode=request.mode.value,
             user_query = request.user_query,
@@ -145,9 +145,11 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
 @app.exception_handler(ValidationError)
 async def validation_exception_handler(request: Request, exc: ValidationError):
     logger.error(f"Validation error: {exc}")
-    return JSONResponse(
+    import json
+    return Response(
+        content=json.dumps({"detail": exc.errors()}),
         status_code=422,
-        content={"detail": exc.errors()}
+        media_type="application/json"
     )
 
 @app.post("/search/compare", tags=["Search"])

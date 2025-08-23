@@ -372,24 +372,24 @@ class HybridRetriever:
         return lab6
 
     # --- LOGIC TÌM KIẾM CHÍNH ---
-    def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[List[str]],
-               color_filters: Optional[List[str]],
+    async def search(self, text_query: str, mode: str, user_query: Optional[str], object_filters: Optional[Dict[str, Any]],
+               color_filters: Optional[List[Any]],
                ocr_query: Optional[str], asr_query: Optional[str], top_k: int) -> List[Dict[str, Any]]:
         if not self.initialized: raise RuntimeError("Retriever is not initialized.")
         start_time = time.time()
-        logger.info(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
-        ic(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
+        #logger.info(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
+        #ic(f"--- [STARTING SEARCH] Query: '{text_query}', Mode: {mode.upper()} ---")
         candidate_info: Dict[str, Dict[str, Any]] = {}
         num_initial_candidates = top_k # Lấy số lượng ứng viên ban đầu lớn hơn
         # GĐ1: LẤY ỨNG VIÊN BAN ĐẦU
         if mode in ['hybrid', 'clip']:
             clip_vector = self.get_clip_text_embedding(text_query).tolist()
-            clip_candidates = self._search_milvus(settings.CLIP_COLLECTION, clip_vector, num_initial_candidates, None, user_query)
-            ic("********************************************************************************")
+            clip_candidates =  await self._search_milvus(settings.CLIP_COLLECTION, clip_vector, num_initial_candidates, None, user_query)
+            #ic("********************************************************************************")
             # ic(clip_candidates)
             for hit in clip_candidates:
                 kf_id = hit["entity"]["keyframe_id"]
-                ic(hit)
+                #ic(hit)
                 # user = hit["entity"]["user"].split(",")
                 vid, kf_id = self._parse_video_id_from_kf(kf_id)
                 score = 1.0 / (1.0 + hit['distance'])
@@ -408,7 +408,7 @@ class HybridRetriever:
         elif mode == 'beit3':
             beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
             beit3_candidates = self._search_milvus(settings.BEIT3_COLLECTION, beit3_vector, num_initial_candidates, None, user_query)
-            ic("************** BEIT3 **************")
+            #ic("************** BEIT3 **************")
             # ic(beit3_candidates)
 
             for hit in beit3_candidates:
@@ -448,11 +448,11 @@ class HybridRetriever:
         if mode == 'hybrid' and candidate_info:
             # ic("trước:::::::: ", candidate_info)
             self._hybrid_reranking(candidate_info, text_query)
-            ic("sau:::::::: ", candidate_info)
+            #ic("sau:::::::: ", candidate_info)
         # GĐ3: TĂNG ĐIỂM với Object/Color
         if object_filters or color_filters:
             # ic(object_filters)
-            self._apply_object_color_filters(candidate_info, object_filters, color_filters, top_k)
+            await self._apply_object_color_filters(candidate_info, object_filters, color_filters, top_k)
 
         # GĐ4: LỌC CỨNG với OCR/ASR
         if ocr_query:
@@ -463,14 +463,44 @@ class HybridRetriever:
         sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
         final_results = self._format_results(sorted_results[:top_k])
         search_time = time.time() - start_time
-        logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
+        #logger.info(f"--- [SEARCH FINISHED] Found {len(final_results)} results in {search_time:.2f}s ---")
         return final_results
 
-    def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None, user_query: str = "") -> List[
+
+    def build_expr(self, expr: Optional[str] = None, user_query: Optional[str] = None) -> Optional[str]:
+        user_list = [
+            "Gia Nguyên, Duy Bảo",
+            "Gia Nguyên, Duy Khương",
+            "Gia Nguyên, Minh Tâm",
+            "Gia Nguyên, Lê Hiếu",
+            "Duy Bảo, Duy Khương",
+            "Duy Bảo, Minh Tâm",
+            "Duy Bảo, Lê Hiếu",
+            "Duy Khương, Minh Tâm",
+            "Duy Khương, Lê Hiếu",
+            "Minh Tâm, Lê Hiếu"
+        ]
+
+        if user_query:
+            # Lọc list các user chứa user_query
+            filtered_users = [u for u in user_list if user_query in u]
+            # Nếu có user nào match
+            if filtered_users:
+                user_expr = f'user in {filtered_users}'
+                # Nếu đã có expr cũ, cộng dồn bằng AND
+                if expr:
+                    expr = f'({expr}) && ({user_expr})'
+                else:
+                    expr = user_expr
+
+        return expr
+
+
+    async def _search_milvus(self, collection_name: str, vector: List[float], top_k: int, expr: Optional[str] = None, user_query: Optional[str] = None) -> List[
         Dict]:
         # ic("alo00", collection_name)
         # Tải sẵn các collection (idempotent)
-        self.db_manager._load_milvus_collections()
+        await self.db_manager._load_milvus_collections()
 
         collection = self.db_manager.get_collection(collection_name)
         # ic(collection)
@@ -484,16 +514,18 @@ class HybridRetriever:
             output_fields = ["object_id", "bbox_xyxy", "color_lab"]
         else:
             output_fields = []
+        
+        expr_new = self.build_expr(expr, user_query)
 
         search_results = collection.search(
             data=[vector],
             anns_field="vector",
             param={"metric_type": "L2", "params": {"nprobe": 16}},
             limit=top_k,
-            expr=expr,  # <-- quan trọng: giới hạn theo object_id in [...]
+            expr=expr_new,  # <-- quan trọng: giới hạn theo object_id in [...]
             output_fields=output_fields,
         )[0]
-        ic(collection_name, search_results)
+        #ic(collection_name, search_results)
 
         hits = []
         for hit in search_results:
@@ -659,37 +691,52 @@ class HybridRetriever:
             return None, None
 
     def _normalize_object_filters(self,
-                                  object_filters: Dict[
-                                      str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]
+                                  object_filters: Dict[str, Any]
                                   ) -> Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]:
         """
         Nhận vào: {obj: [((L,A,B),(xmin,ymin,xmax,ymax)), ...]}
         Trả ra:   y hệt, nhưng có validate cơ bản.
         """
         norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
+        
+        if not isinstance(object_filters, dict):
+            logger.warning("object_filters is not a dict, skipping")
+            return norm
+            
         for obj, items in object_filters.items():
+            if not isinstance(items, (list, tuple)):
+                logger.warning(f"object_filters['{obj}'] is not a list/tuple, skipping")
+                continue
+                
             fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
             for it in items:
-                # kỳ vọng: it = ((L,A,B),(x1,y1,x2,y2))
-                if (not isinstance(it, (list, tuple))) or len(it) != 2:
+                try:
+                    # kỳ vọng: it = ((L,A,B),(x1,y1,x2,y2))
+                    if (not isinstance(it, (list, tuple))) or len(it) != 2:
+                        logger.debug(f"Invalid item format in object_filters['{obj}'], expected 2-tuple")
+                        continue
+                    lab, bbox = it[0], it[1]
+                    if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
+                        logger.debug(f"Invalid LAB format in object_filters['{obj}'], expected 3-tuple")
+                        continue
+                    if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+                        logger.debug(f"Invalid bbox format in object_filters['{obj}'], expected 4-tuple")
+                        continue
+                    lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
+                    bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                    fixed.append((lab_t, bbox_t))
+                except (ValueError, TypeError, IndexError) as e:
+                    logger.warning(f"Error parsing object_filters['{obj}'] item: {e}")
                     continue
-                lab, bbox = it[0], it[1]
-                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
-                    continue
-                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
-                    continue
-                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
-                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                fixed.append((lab_t, bbox_t))
             if fixed:
                 norm[obj] = fixed
         return norm
 
-    def _apply_object_color_filters(
+    async def _apply_object_color_filters(
             self,
             candidate_info: Dict[str, Dict[str, Any]],
-            object_filters: Optional[Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]],
-            color_filters: Optional[List[Tuple[float, float, float]]],
+            object_filters: Optional[Dict[str, Any]],
+            color_filters: Optional[List[Any]],
             top_k: int
     ):
         # ====== helpers nội bộ ======
@@ -801,7 +848,7 @@ class HybridRetriever:
         # ===== OBJECT FILTERS =====
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
-            ic(norm_object_filters)
+            #ic(norm_object_filters)
 
             for obj_label, queries in norm_object_filters.items():
                 # vector của nhãn cần tìm (chung cho các truy vấn con của label này)
@@ -816,7 +863,7 @@ class HybridRetriever:
                     # lấy toàn bộ object của frame này
                     expr = f"object_id in [{','.join(map(str, obj_ids))}]"
                     limit = max(len(obj_ids), 1)
-                    obj_hits = self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, limit, expr=expr)
+                    obj_hits = await self._search_milvus(settings.OBJECT_COLLECTION, obj_vector, limit, expr=expr)
                     if not obj_hits:
                         continue
 
@@ -1155,11 +1202,11 @@ class HybridRetriever:
             return candidate_info
 
         kf_ids_to_fetch = list(candidate_info.keys())
-        logger.debug(f"Chuẩn bị áp dụng bộ lọc OCR cho {len(kf_ids_to_fetch)} ứng viên.")
+        #logger.debug(f"Chuẩn bị áp dụng bộ lọc OCR cho {len(kf_ids_to_fetch)} ứng viên.")
 
         ocr_texts_from_es = {}
-        try:
-            ic(f"ES: Lấy văn bản OCR cho {len(kf_ids_to_fetch)} keyframes.")
+        #try:
+            #ic(f"ES: Lấy văn bản OCR cho {len(kf_ids_to_fetch)} keyframes.")
             #cmt elastic
             # res = es_client.search(
             #     index=settings.OCR_INDEX,
@@ -1181,9 +1228,9 @@ class HybridRetriever:
             #         ocr_texts_from_es[kf_id] = text
             # ic(f"ES: Tìm thấy văn bản cho {len(ocr_texts_from_es)}/{len(kf_ids_to_fetch)} keyframes.")
 
-        except Exception as e:
-            logger.error(f"ES OCR search để lấy văn bản thất bại: {e}", exc_info=True)
-            return candidate_info
+        #except Exception as e:
+            #logger.error(f"ES OCR search để lấy văn bản thất bại: {e}", exc_info=True)
+            #return candidate_info
 
         # Ngưỡng fuzzy (có thể điều chỉnh nếu cần, giữ nguyên hành vi cộng điểm khi đạt ngưỡng)
         FUZZ_THRESHOLD = 70  # hạ ngưỡng để phù hợp partial/token_set
@@ -1208,8 +1255,8 @@ class HybridRetriever:
                 info['reasons'].append(f"OCR fuzzy match (score={int(score)})")
                 matched_count += 1
 
-        logger.info(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
-        ic(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
+        #logger.info(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
+        #ic(f"Bộ lọc OCR: {matched_count}/{len(candidate_info)} ứng viên được tăng điểm.")
         return candidate_info
 
     def _format_results(self, sorted_candidates: List[Tuple[str, Dict]]) -> List[Dict]:
