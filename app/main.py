@@ -7,7 +7,8 @@ import logging
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
 import uvicorn
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request, Response
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -145,11 +146,9 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
 @app.exception_handler(ValidationError)
 async def validation_exception_handler(request: Request, exc: ValidationError):
     logger.error(f"Validation error: {exc}")
-    import json
-    return Response(
-        content=json.dumps({"detail": exc.errors()}),
+    return JSONResponse(
         status_code=422,
-        media_type="application/json"
+        content={"detail": exc.errors()}
     )
 
 @app.post("/search/compare", tags=["Search"])

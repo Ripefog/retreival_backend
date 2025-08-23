@@ -25,17 +25,18 @@ class SearchRequest(BaseModel):
     user_query: Optional[str] = Field(default=None, description="Tên người dùng để lọc kết quả")
     object_filters: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Từ điển: tên đối tượng -> danh sách tuple (L, A, B, (xmin, ymin, xmax, ymax)) để tăng điểm ưu tiên."
+        description="Từ điển: tên đối tượng -> danh sách tuple ([R,G,B] hoặc [L,a,b], [xmin, ymin, xmax, ymax]) để tăng điểm ưu tiên. Màu có thể là RGB hoặc LAB (auto-detect)."
     )
 
-    # màu LAB
+    # màu RGB hoặc LAB (auto-detect)
     color_filters: Optional[List[Any]] = Field(
         default=None,
-        description="Danh sách các màu LAB (L, A, B) để tăng điểm ưu tiên."
+        description="Danh sách các màu để tăng điểm ưu tiên. Có thể là RGB [R,G,B] (0-255) hoặc LAB [L,a,b]. Hệ thống tự động phát hiện và chuyển đổi."
     )
     ocr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các keyframe có chứa văn bản này (OCR).")
     asr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các video có chứa lời thoại này (ASR).")
-    top_k: int = Field(default=20, ge=1, le=1000, description="Số lượng kết quả hàng đầu để trả về.")
+    top_k: int = Field(default=20, ge=1, le=2000, description="Số lượng kết quả hàng đầu để trả về.")
+    #exact_match: bool = Field(default=False, description="Chế độ exact matching: ưu tiên kết quả có object/color filters khớp chính xác.")
 
 # --- API Response Models ---
 class SearchResultMetadata(BaseModel):

@@ -152,6 +152,7 @@ data/
 model/
 temp/
 tmp/
+co_dino_5scale_swin_large_16e_o365tococo.pth
 
 # Docker
 .dockerignore
