@@ -34,6 +34,11 @@ pillow
 colormath
 rapidfuzz>=3.9.0
 
+# Performance optimization libraries
+scipy>=1.7.0  # For optimized Hungarian algorithm
+numpy>=1.21.0 # For vectorization
+colorspacious # For optimized CIEDE2000 color distance
+
 # Libraries from notebook (ít quan trọng hơn)
 moviepy
 nbimporter

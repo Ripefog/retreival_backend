@@ -35,7 +35,7 @@ class SearchRequest(BaseModel):
     )
     ocr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các keyframe có chứa văn bản này (OCR).")
     asr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các video có chứa lời thoại này (ASR).")
-    top_k: int = Field(default=20, ge=1, le=200, description="Số lượng kết quả hàng đầu để trả về.")
+    top_k: int = Field(default=20, ge=1, le=1000, description="Số lượng kết quả hàng đầu để trả về.")
 
 # --- API Response Models ---
 class SearchResultMetadata(BaseModel):

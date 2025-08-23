@@ -50,8 +50,9 @@ RUN wget https://github.com/addf400/files/releases/download/beit3/beit3_base_pat
 
 # [CẬP NHẬT] Tải model Co-DETR từ Google Drive bằng gdown với File ID mới
 # File ID mới: 1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO
-RUN gdown '1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO' -O /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth
+#RUN gdown '1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO' -O /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth
 
+COPY co_dino_5scale_swin_large_16e_o365tococo.pth /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth
 # --- Cài đặt Co-DETR ---
 # Hạ pip/setuptools/wheel TƯƠNG THÍCH Torch 1.9 (giữ nguyên)
 RUN pip install --no-cache-dir --upgrade "pip<24" "setuptools==59.5.0" "wheel<0.41" "packaging==21.3"
