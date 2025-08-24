@@ -193,6 +193,36 @@ async def process_image_for_objects(file: UploadFile = File(..., description="Fi
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
+@app.get("/optimization/stats", tags=["Optimization"])
+async def get_optimization_stats():
+    """Get performance optimization statistics and cache metrics."""
+    if not retriever:
+        raise HTTPException(status_code=503, detail="Retriever service is not available.")
+    
+    stats = retriever.get_optimization_stats()
+    return {
+        "status": "optimized",
+        "optimization_stats": stats,
+        "message": "Performance optimizations active: caching, vectorization, precomputed embeddings"
+    }
+
+@app.post("/optimization/cache/clear", tags=["Optimization"])
+async def clear_optimization_cache(cache_type: str = "all"):
+    """Clear optimization caches (all, embeddings, search, objects, colors)."""
+    if not retriever:
+        raise HTTPException(status_code=503, detail="Retriever service is not available.")
+    
+    valid_types = ["all", "embeddings", "search", "objects", "colors"]
+    if cache_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Invalid cache_type. Must be one of: {valid_types}")
+    
+    retriever.clear_cache(cache_type)
+    return {
+        "status": "success",
+        "message": f"Cache cleared: {cache_type}",
+        "cache_type": cache_type
+    }
+
 if __name__ == "__main__":
     # Chạy server Uvicorn khi thực thi file này trực tiếp
     # Hữu ích cho việc phát triển và gỡ lỗi cục bộ

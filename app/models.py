@@ -25,7 +25,17 @@ class SearchRequest(BaseModel):
     user_query: Optional[str] = Field(default=None, description="Tên người dùng để lọc kết quả")
     object_filters: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Từ điển: tên đối tượng -> danh sách tuple ([R,G,B] hoặc [L,a,b], [xmin, ymin, xmax, ymax]) để tăng điểm ưu tiên. Màu có thể là RGB hoặc LAB (auto-detect)."
+        description="""Từ điển: tên đối tượng -> danh sách constraints để tăng điểm ưu tiên. 
+        
+        Supported formats:
+        - Empty array: object-only search -> {"person": []}
+        - Color only: [R,G,B] or [L,a,b] -> {"person": [[255,0,0]]}  
+        - BBox only: [x1,y1,x2,y2] -> {"person": [[100,100,200,200]]}
+        - Full constraint: [[color], [bbox]] -> {"person": [[[255,0,0], [100,100,200,200]]]}
+        - Dict format: {"person": [{"color": [255,0,0], "bbox": [100,100,200,200]}]}
+        - Mixed: {"person": [[], [255,0,0], [[255,0,0], [100,100,200,200]]]}
+        
+        Color auto-detection: RGB (0-255) hoặc LAB space."""
     )
 
     # màu RGB hoặc LAB (auto-detect)
@@ -75,66 +85,99 @@ search_examples = {
             "top_k": 5
         },
     },
-    "complex_filters": {
-        "summary": "2. Tìm kiếm với bộ lọc Object & Color (dạng lồng)",
-        "description": "Ưu tiên đối tượng 'person', 'man' và màu xanh (LAB). object_filters dùng ((LAB),(BBOX)).",
+    "object_only_search": {
+        "summary": "2. Object-only search (NEW FORMAT)",
+        "description": "Tìm keyframes có object 'person' và 'chair' không quan tâm màu sắc hay vị trí.",
         "value": {
-            "text_query": "a man wearing something blue",
+            "text_query": "A man is speaking in front of a microphone on HTV7",
             "mode": "hybrid",
-            "user_query": "Minh Tâm",
+            "user_query": "",
             "object_filters": {
-                "person": [
-                    ((50.0, -2.0, 12.0), (0, 0, 1920, 1080))
-                ],
-                "man": [
-                    ((55.0, -1.5, 10.0), (100, 200, 600, 900))
-                ]
+                "person": [],
+                "chair": []
             },
-            "color_filters": [
-                (32.0, -5.0, -35.0)
-            ],
-            "top_k": 5
+            "top_k": 20
         },
     },
-    "full_filters": {
-        "summary": "3. Tìm kiếm phức hợp với tất cả bộ lọc (dạng lồng)",
-        "description": "Kết hợp object (LAB+BBOX), màu, OCR và ASR.",
+    "color_constraint": {
+        "summary": "3. Color-only constraint (NEW FORMAT)",
+        "description": "Tìm object 'person' có màu đỏ và 'car' có màu xanh (RGB format).",
+        "value": {
+            "text_query": "person in red shirt near blue car",
+            "mode": "hybrid",
+            "object_filters": {
+                "person": [[255, 0, 0]],
+                "car": [[0, 0, 255]]
+            },
+            "top_k": 10
+        },
+    },
+    "bbox_constraint": {
+        "summary": "4. Spatial constraint (NEW FORMAT)",  
+        "description": "Tìm object 'person' trong vùng trung tâm màn hình.",
+        "value": {
+            "text_query": "person in the center of the frame",
+            "mode": "hybrid",
+            "object_filters": {
+                "person": [[400, 200, 800, 600]]
+            },
+            "top_k": 10
+        },
+    },
+    "mixed_constraints": {
+        "summary": "5. Mixed constraints (NEW FORMAT)",
+        "description": "Kết hợp nhiều loại constraint cho cùng object.",
+        "value": {
+            "text_query": "presenter on stage",
+            "mode": "hybrid",
+            "object_filters": {
+                "person": [
+                    [],
+                    [255, 0, 0],
+                    [[100, 100, 500, 500]],
+                    [[255, 255, 255], [200, 150, 600, 400]]
+                ]
+            },
+            "top_k": 15
+        },
+    },
+    "dict_format": {
+        "summary": "6. Dictionary format (NEW FORMAT)",
+        "description": "Sử dụng dictionary format rõ ràng hơn.",
+        "value": {
+            "text_query": "news anchor in studio",
+            "mode": "hybrid",
+            "object_filters": {
+                "person": [
+                    {"color": [128, 128, 128], "bbox": [100, 50, 600, 400]}
+                ],
+                "chair": [
+                    {"color": [139, 69, 19]}
+                ]
+            },
+            "top_k": 10
+        },
+    },
+    "backward_compatibility": {
+        "summary": "7. Backward compatibility (OLD FORMAT)",
+        "description": "Format cũ vẫn hoạt động: ((LAB), (BBOX)).",
         "value": {
             "text_query": "a presenter on stage",
             "mode": "hybrid",
             "user_query": "Minh Tâm",
             "object_filters": {
                 "person": [
-                    ((70.0, 0.0, 0.0), (10, 20, 300, 400))
+                    [[70.0, 0.0, 0.0], [10, 20, 300, 400]]
                 ],
                 "presenter": [
-                    ((65.0, 5.0, 5.0), (200, 100, 800, 700))
+                    [[65.0, 5.0, 5.0], [200, 100, 800, 700]]
                 ]
             },
             "color_filters": [
-                (55.0, 65.0, 25.0)
+                [55.0, 65.0, 25.0]
             ],
             "ocr_query": "VIỆT NAM",
             "asr_query": "kinh tế",
-            "top_k": 5
-        },
-    },
-    "vietnamese_query": {
-        "summary": "4. Tìm kiếm bằng Tiếng Việt (dạng lồng)",
-        "description": "Ví dụ: 'nữ biên tập viên mặc áo hồng'.",
-        "value": {
-            "text_query": "nữ biên tập viên mặc áo hồng đang dẫn chương trình thời sự",
-            "mode": "hybrid",
-            "user_query": "Minh Tâm",
-            "object_filters": {
-                "person": [
-                    ((60.0, 50.0, 20.0), (0, 0, 1280, 720))
-                ]
-            },
-            "color_filters": [
-                (70.0, 60.0, 20.0),
-                (50.0, 65.0, 30.0)
-            ],
             "top_k": 5
         },
     },

@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_RELOAD: bool = True
     
+    # --- Cache Configuration ---
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    ENABLE_REDIS_CACHE: bool = True
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

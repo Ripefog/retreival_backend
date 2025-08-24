@@ -5,7 +5,7 @@ import time
 import os
 import sys
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Union
 import numpy as np
 import torch
 from PIL import Image
@@ -43,6 +43,8 @@ from icecream import ic
 # Import từ các module của ứng dụng
 from .config import settings
 from .database import db_manager
+from .caching import CacheManager, cached_embedding, cached_search_results
+from .vectorization import vectorized_ops
 import numpy as np
 from rapidfuzz import fuzz
 if not hasattr(np, "asscalar"): 
@@ -50,6 +52,13 @@ if not hasattr(np, "asscalar"):
 
 logger = logging.getLogger(__name__)
 
+# OPTIMIZATION: Global cache manager instance
+cache_manager = CacheManager(
+    redis_host=getattr(settings, 'REDIS_HOST', 'localhost'),
+    redis_port=getattr(settings, 'REDIS_PORT', 6379),
+    memory_cache_size=1000,
+    enable_redis=getattr(settings, 'ENABLE_REDIS_CACHE', True)
+)
 
 # --- Cấu hình cho BEiT-3 (lấy từ repo gốc) ---
 class BEiT3Config:
@@ -106,7 +115,7 @@ class ObjectColorDetector:
     """Sử dụng Co-DETR để phát hiện đối tượng và màu sắc chính của chúng."""
 
     def __init__(self, device):
-        logger.info("Initializing ObjectColorDetector (Co-DETR)...")
+        logger.info("Initializing OPTIMIZED ObjectColorDetector (Co-DETR)...")
         self.device = device
         self.model = init_detector(
             Config.fromfile(settings.CO_DETR_CONFIG_PATH),
@@ -121,39 +130,55 @@ class ObjectColorDetector:
             'orange': (255, 165, 0), 'brown': (165, 42, 42), 'pink': (255, 192, 203), 
             'purple': (128, 0, 128)
         }
+        
+        # OPTIMIZATION: Precompute LAB colors using vectorization
+        self.basic_colors_lab = self._precompute_basic_colors_lab()
         self.color_names = list(self.basic_colors.keys())
         self.color_tree = KDTree(np.array(list(self.basic_colors.values())))
-        logger.info("✅ Co-DETR model loaded.")
+        logger.info("✅ Optimized Co-DETR model loaded with precomputed color space.")
 
-    def _convert_basic_colors_to_lab(self) -> dict:
-        """Chuyển basic_colors sang CIELAB để so sánh nhanh hơn."""
+    def _precompute_basic_colors_lab(self) -> dict:
+        """OPTIMIZED: Batch convert basic colors to LAB using vectorization."""
+        rgb_array = np.array(list(self.basic_colors.values()), dtype=np.float32)
+        lab_array = vectorized_ops.batch_color_conversion_rgb_to_lab(rgb_array)
+        
         lab_dict = {}
-        for name, rgb in self.basic_colors.items():
-            rgb_obj = sRGBColor(*rgb, is_upscaled=True)
-            lab_obj = convert_color(rgb_obj, LabColor)
-            lab_dict[name] = lab_obj
+        for i, name in enumerate(self.basic_colors.keys()):
+            lab_dict[name] = LabColor(*lab_array[i])
         return lab_dict
 
+    def _convert_basic_colors_to_lab(self) -> dict:
+        """DEPRECATED: Use _precompute_basic_colors_lab instead."""
+        return self._precompute_basic_colors_lab()
+
     def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
-        """Convert RGB tuple to CIELAB tuple."""
-        rgb_obj = sRGBColor(*rgb, is_upscaled=True)
-        lab_obj = convert_color(rgb_obj, LabColor)
-        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
+        """OPTIMIZED: Cached RGB to LAB conversion using vectorization."""
+        # Check cache first
+        cached_result = cache_manager.get_cached_color_conversion(rgb)
+        if cached_result is not None:
+            return cached_result
+        
+        # Compute using vectorized operation
+        rgb_array = np.array([rgb], dtype=np.float32)
+        lab_array = vectorized_ops.batch_color_conversion_rgb_to_lab(rgb_array)
+        lab_tuple = tuple(lab_array[0])
+        
+        # Cache result
+        cache_manager.cache_color_conversion(rgb, lab_tuple)
+        return lab_tuple
 
     def _get_closest_color_name(self, rgb: Tuple[int, int, int]) -> str:
-        """Tìm tên màu gần nhất theo thị giác (CIELAB + Delta E CIEDE2000)."""
-        rgb_color = sRGBColor(*rgb, is_upscaled=True)
-        lab_color = convert_color(rgb_color, LabColor)
-
-        min_delta = float('inf')
-        closest_name = None
-
-        for name, lab_ref in self.basic_colors_lab.items():
-            delta = delta_e_cie2000(lab_color, lab_ref)
-            if delta < min_delta:
-                min_delta = delta
-                closest_name = name
-        return closest_name
+        """OPTIMIZED: Tìm tên màu gần nhất với vectorized distance calculation."""
+        lab_color = self._rgb_to_lab(rgb)
+        lab_ref_values = [
+            (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b) 
+            for lab_obj in self.basic_colors_lab.values()
+        ]
+        
+        # Use vectorized distance calculation
+        distances = vectorized_ops.vectorized_color_distances([lab_color], lab_ref_values)[0]
+        min_idx = np.argmin(distances)
+        return self.color_names[min_idx]
 
     def detect(self, image_path: str) -> Tuple[
         List[Tuple[float, float, float]],
@@ -219,17 +244,21 @@ class HybridRetriever:
         self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
         self.beit3_model, self.beit3_preprocess, self.beit3_sp_model = None, None, None
         self.object_detector: Optional[ObjectColorDetector] = None
+        
+        # OPTIMIZATION: Precomputed embeddings for common objects
+        self.precomputed_embeddings = {}
 
     async def initialize(self):
-        """Khởi tạo retriever: kết nối DB và tải model một cách an toàn."""
+        """OPTIMIZED: Khởi tạo retriever với precomputed embeddings."""
         if self.initialized: 
             return
-        logger.info("Initializing Hybrid Retriever engine...")
+        logger.info("Initializing OPTIMIZED Hybrid Retriever engine...")
         if not self.db_manager.milvus_connected or not self.db_manager.elasticsearch_connected:
             raise RuntimeError("Database connections must be established before initializing the retriever.")
         self._load_models()
+        await self._precompute_common_embeddings()
         self.initialized = True
-        logger.info("✅ Hybrid Retriever initialized successfully.")
+        logger.info("✅ Optimized Hybrid Retriever initialized successfully.")
 
     def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
         """Convert RGB tuple to CIELAB tuple."""
@@ -265,14 +294,48 @@ class HybridRetriever:
         # 3. Tải Co-DETR
         self.object_detector = ObjectColorDetector(device=self.device)
 
+    async def _precompute_common_embeddings(self):
+        """OPTIMIZATION: Precompute embeddings for common objects and cache them."""
+        common_objects = [
+            "person", "man", "woman", "child", "people",
+            "car", "truck", "bus", "motorcycle", "vehicle", 
+            "building", "house", "office", "store", "shop",
+            "tree", "grass", "sky", "cloud", "water",
+            "street", "road", "sidewalk", "bridge",
+            "food", "table", "chair", "computer", "phone"
+        ]
+        
+        logger.info(f"Precomputing embeddings for {len(common_objects)} common objects...")
+        
+        for obj_name in common_objects:
+            # Check if already cached
+            cached_embedding = cache_manager.get_cached_object_embedding(obj_name)
+            if cached_embedding is not None:
+                self.precomputed_embeddings[obj_name] = cached_embedding
+            else:
+                # Compute and cache
+                embedding = self.get_clip_text_embedding_direct(obj_name)
+                self.precomputed_embeddings[obj_name] = embedding
+                cache_manager.cache_object_embedding(obj_name, embedding)
+        
+        logger.info(f"✅ Precomputed {len(self.precomputed_embeddings)} object embeddings")
+
     # --- CÁC HÀM MÃ HÓA (EMBEDDING) ---
-    def get_clip_text_embedding(self, text: str) -> np.ndarray:
+    def get_clip_text_embedding_direct(self, text: str) -> np.ndarray:
+        """Direct embedding computation without caching decorator."""
         with torch.no_grad():
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
 
+    @cached_embedding(cache_manager, 'clip')
+    def get_clip_text_embedding(self, text: str) -> np.ndarray:
+        """OPTIMIZED: Cached CLIP text embedding."""
+        return self.get_clip_text_embedding_direct(text)
+
+    @cached_embedding(cache_manager, 'beit3')
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
+        """OPTIMIZED: Cached BEiT-3 text embedding."""
         with torch.no_grad():
             text_ids = self.beit3_sp_model.encode_as_ids(text)
             text_padding_mask = [0] * len(text_ids)
@@ -285,35 +348,28 @@ class HybridRetriever:
             )
             return text_emb.cpu().numpy()[0]
 
+    def get_object_embedding_fast(self, object_name: str) -> np.ndarray:
+        """OPTIMIZED: Fast object embedding lookup with precomputed cache."""
+        obj_name_lower = object_name.lower()
+        
+        # Check precomputed embeddings first
+        if obj_name_lower in self.precomputed_embeddings:
+            return self.precomputed_embeddings[obj_name_lower].copy()
+        
+        # Check cache
+        cached_embedding = cache_manager.get_cached_object_embedding(obj_name_lower)
+        if cached_embedding is not None:
+            return cached_embedding
+        
+        # Compute and cache
+        embedding = self.get_clip_text_embedding(object_name)
+        cache_manager.cache_object_embedding(obj_name_lower, embedding)
+        return embedding
+
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]], 
                                    colors2: List[Tuple[float, float, float]]) -> np.ndarray:
-        """
-        OPTIMIZED: Vectorized color distance calculation using NumPy.
-        Returns distance matrix of shape (len(colors1), len(colors2))
-        """
-        if not colors1 or not colors2:
-            return np.array([[]])
-        
-        # Convert to numpy arrays for vectorized operations
-        c1_array = np.array(colors1)  # shape: (m, 3)
-        c2_array = np.array(colors2)  # shape: (n, 3)
-        
-        if HAS_COLORSPACIOUS:
-            # Use optimized colorspacious for accurate CIEDE2000
-            distances = np.zeros((len(colors1), len(colors2)))
-            for i, color1 in enumerate(colors1):
-                for j, color2 in enumerate(colors2):
-                    distances[i, j] = colorspacious.deltaE(color1, color2, input_space="CIELab")
-            return distances
-        else:
-            # Fallback: Euclidean distance in LAB space (much faster, reasonably accurate)
-            # Broadcast to compute all pairwise distances at once
-            c1_expanded = c1_array[:, np.newaxis, :]  # shape: (m, 1, 3)
-            c2_expanded = c2_array[np.newaxis, :, :]  # shape: (1, n, 3)
-            
-            # Euclidean distance in LAB space
-            distances = np.sqrt(np.sum((c1_expanded - c2_expanded) ** 2, axis=2))
-            return distances
+        """OPTIMIZED: Use vectorized operations for color distances."""
+        return vectorized_ops.vectorized_color_distances(colors1, colors2)
 
     def _compare_color(self, color1: Tuple[float, float, float], color2: Tuple[float, float, float]) -> float:
         """
@@ -324,23 +380,14 @@ class HybridRetriever:
         return distances[0, 0] if distances.size > 0 else 0.0
 
     def _compare_bbox(self, bbox1: Tuple[int, int, int, int], bbox2: Tuple[int, int, int, int]) -> float:
-        """So sánh hai bounding box bằng IoU (Intersection over Union)."""
-        x1_min, y1_min, x1_max, y1_max = bbox1
-        x2_min, y2_min, x2_max, y2_max = bbox2
+        """OPTIMIZED: Single bbox comparison using vectorized backend."""
+        iou_matrix = vectorized_ops.batch_bbox_iou(np.array([bbox1]), np.array([bbox2]))
+        return float(iou_matrix[0, 0])
 
-        # Tính diện tích giao nhau
-        x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
-        y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
-        intersection = x_overlap * y_overlap
-        
-        # Tính diện tích của mỗi bbox
-        area1 = (x1_max - x1_min) * (y1_max - y1_min)
-        area2 = (x2_max - x2_min) * (y2_max - y2_min)
-
-        # Tính IoU
-        union = area1 + area2 - intersection
-        iou = intersection / union if union > 0 else 0
-        return iou
+    def _compare_bbox_vectorized(self, bboxes1: List[Tuple[int, int, int, int]], 
+                               bboxes2: List[Tuple[int, int, int, int]]) -> np.ndarray:
+        """OPTIMIZED: Vectorized IoU computation for multiple bounding boxes."""
+        return vectorized_ops.batch_bbox_iou(np.array(bboxes1), np.array(bboxes2))
 
     def _parse_video_id_from_kf(self, kf: str) -> Tuple[str, str]:
         """
@@ -424,6 +471,7 @@ class HybridRetriever:
         return lab6
 
     # --- LOGIC TÌM KIẾM CHÍNH ---
+    @cached_search_results(cache_manager)
     async def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[Dict],
                     color_filters: Optional[List], ocr_query: Optional[str], asr_query: Optional[str], 
                     top_k: int) -> List[Dict[str, Any]]:
@@ -482,7 +530,13 @@ class HybridRetriever:
         final_results = self._format_results(sorted_results[:top_k])
         
         search_time = time.time() - start_time
-        logger.info(f"Search completed in {search_time:.2f}s with {len(final_results)} results")
+        logger.info(f"OPTIMIZED Search completed in {search_time:.2f}s with {len(final_results)} results")
+        
+        # Log cache performance for non-cached queries
+        if search_time > 0.1:  # Only log for non-cached queries
+            cache_stats = cache_manager.get_cache_stats()
+            logger.info(f"Cache stats: embedding_hit_rate={cache_stats.get('embedding_hit_rate', 0):.1f}%, search_hit_rate={cache_stats.get('search_hit_rate', 0):.1f}%")
+        
         return final_results
 
     async def _search_milvus_async(self, collection_name: str, vector: List[float], top_k: int, 
@@ -751,16 +805,19 @@ class HybridRetriever:
             """Similarity from ΔE: exp(-(ΔE/σ)²)."""
             return np.exp(-(d / sigma) ** 2)
 
-        # ===== OBJECT FILTERS =====
+        # ===== COMPREHENSIVE OBJECT FILTERS =====
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
 
-            for obj_label, queries in norm_object_filters.items():
-                obj_vector = self.get_clip_text_embedding(obj_label).tolist()
+            for obj_label, constraint_list in norm_object_filters.items():
+                logger.info(f"Processing object filter: '{obj_label}' with {len(constraint_list)} constraints")
                 
-                # OPTIMIZED: Collect all object IDs from all candidates for batch query
+                # Get object embedding
+                obj_vector = self.get_object_embedding_fast(obj_label).tolist()
+                
+                # Collect all object IDs for batch processing
                 all_object_ids = []
-                candidate_objects = {}  # kf_id -> list of object_ids
+                candidate_objects = {}
                 
                 for kf_id, info in candidate_info.items():
                     obj_ids = info.get("object_ids") or []
@@ -771,123 +828,24 @@ class HybridRetriever:
                 if not all_object_ids:
                     continue
                 
-                # OPTIMIZED: Single batch query instead of per-candidate queries
+                # Batch query objects
                 batch_results = await self._batch_search_milvus_objects(all_object_ids, obj_vector)
                 
-                # Process each candidate
+                # Process each candidate keyframe
                 for kf_id, obj_ids in candidate_objects.items():
-                    # Get results for this candidate's objects
                     obj_hits = [batch_results[obj_id] for obj_id in obj_ids if obj_id in batch_results]
                     
                     if not obj_hits:
                         continue
 
-                    # Prepare queries (same as before)
-                    Q = []
-                    for (q_color, q_bbox) in queries:
-                        q_lab = _ensure_lab(q_color) if q_color is not None else None
-                        q_bb = tuple(q_bbox) if q_bbox is not None else None
-                        Q.append((q_lab, q_bb))
+                    # Apply comprehensive constraint matching
+                    final_boost, match_details = self._apply_comprehensive_object_matching(
+                        constraint_list, obj_hits, obj_label
+                    )
                     
-                    m = len(Q)
-                    if m == 0:
-                        continue
-
-                    # Parse hits
-                    O_vec_sim = []
-                    O_color_lab = []
-                    O_bbox = []
-                    
-                    for h in obj_hits:
-                        ent = h.get("entity", {})
-                        d = float(h.get("distance", 0.0))
-                        s_vec = 1.0 / (1.0 + d)
-                        O_vec_sim.append(s_vec)
-                        
-                        cl = self._split_csv_floats(ent.get("color_lab"))
-                        bl = self._split_csv_floats(ent.get("bbox_xyxy"))
-                        O_color_lab.append(cl if len(cl) == 3 else None)
-                        O_bbox.append(tuple(bl) if len(bl) == 4 else None)
-
-                    n = len(O_vec_sim)
-                    if n == 0:
-                        continue
-
-                    # OPTIMIZED: Vectorized similarity matrix computation
-                    S = np.zeros((m, n))
-                    
-                    for i in range(m):
-                        q_lab, q_bb = Q[i]
-                        use_vec = True
-                        use_color = (q_lab is not None)
-                        use_bbox = (q_bb is not None)
-
-                        # Re-normalize weights
-                        w_sum = 0.0
-                        wv = W_VEC if use_vec else 0.0
-                        wc = W_COLOR if use_color else 0.0
-                        wb = W_BBOX if use_bbox else 0.0
-                        w_sum = wv + wc + wb
-                        
-                        if w_sum == 0:
-                            continue
-                            
-                        wv /= w_sum
-                        wc /= w_sum
-                        wb /= w_sum
-
-                        # Vector similarity (vectorized)
-                        vec_sim = np.array(O_vec_sim) * wv
-                        S[i, :] += vec_sim
-
-                        # Color similarity (vectorized if possible)
-                        if use_color:
-                            valid_colors = [(j, tuple(O_color_lab[j])) for j in range(n) if O_color_lab[j] is not None]
-                            if valid_colors:
-                                indices, colors = zip(*valid_colors)
-                                # Use vectorized color distance computation
-                                distances = self._vectorized_color_distances([q_lab], list(colors))[0]  # shape: (len(colors),)
-                                
-                                for idx_in_valid, j in enumerate(indices):
-                                    de = distances[idx_in_valid]
-                                    if de <= MAX_DELTA_E:
-                                        s_col = _sim_from_delta(de, SIGMA_COLOR)
-                                        S[i, j] += wc * s_col
-
-                        # Bbox similarity
-                        if use_bbox:
-                            for j in range(n):
-                                p_bb = O_bbox[j]
-                                if p_bb is not None:
-                                    iou = float(self._compare_bbox(q_bb, p_bb))
-                                    if iou >= MIN_IOU:
-                                        S[i, j] += wb * iou
-
-                    # OPTIMIZED: scipy Hungarian algorithm
-                    cost_matrix = 1.0 - S
-                    row_indices, col_indices = linear_sum_assignment(cost_matrix)
-
-                    # Aggregate score
-                    sim_sum = 0.0
-                    covered = 0
-                    
-                    for row_idx, col_idx in zip(row_indices, col_indices):
-                        if row_idx < m and col_idx < n:
-                            sij = S[row_idx, col_idx]
-                            sim_sum += sij
-                            if sij >= TAU_S:
-                                covered += 1
-
-                    S_match = (sim_sum / m) if m > 0 else 0.0
-                    C = (covered / m) if m > 0 else 0.0
-                    S_obj = ALPHA * S_match + BETA * C
-                    boost = W_OBJ * S_obj
-
-                    if boost > 0:
-                        candidate_info[kf_id]["score"] += boost
-                        candidate_info[kf_id].setdefault("reasons", []).append(
-                            f"Object match: '{obj_label}' +{boost:.3f} (S={S_obj:.3f}, cov={C:.2f})"
-                        )
+                    if final_boost > 0:
+                        candidate_info[kf_id]["score"] += final_boost
+                        candidate_info[kf_id].setdefault("reasons", []).extend(match_details)
 
         # ===== COLOR FILTERS (OPTIMIZED) =====
         if color_filters:
@@ -943,30 +901,405 @@ class HybridRetriever:
                         )
 
     def _normalize_object_filters(self, object_filters: Dict) -> Dict:
-        """Normalize and validate object filters."""
-        norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
+        """
+        Comprehensive object filters normalization supporting all cases:
+        1. Empty array: object-only search -> {"person": []}
+        2. Color only: color constraint -> {"person": [[L,a,b]]}  
+        3. BBox only: spatial constraint -> {"person": [[x1,y1,x2,y2]]}
+        4. Full constraint: color + bbox -> {"person": [[[L,a,b], [x1,y1,x2,y2]]]}
+        5. Mixed constraints: multiple conditions -> {"person": [[], [L,a,b], [[L,a,b], [x1,y1,x2,y2]]]}
+        """
+        norm: Dict[str, List[Any]] = {}
         
         for obj, items in object_filters.items():
-            fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
-            
-            for it in items:
-                if (not isinstance(it, (list, tuple))) or len(it) != 2:
-                    continue
-                    
-                lab, bbox = it[0], it[1]
-                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
-                    continue
-                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
-                    continue
-                    
-                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
-                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                fixed.append((lab_t, bbox_t))
+            if not isinstance(items, (list, tuple)):
+                logger.warning(f"Invalid object_filters['{obj}'] format: expected array, got {type(items)}")
+                continue
                 
-            if fixed:
-                norm[obj] = fixed
+            # Handle empty array case: object-only search
+            if len(items) == 0:
+                norm[obj] = [{'type': 'object_only'}]
+                logger.info(f"Object filter '{obj}': object-only search (no constraints)")
+                continue
+            
+            normalized_items = []
+            
+            for idx, item in enumerate(items):
+                try:
+                    normalized_item = self._normalize_single_object_constraint(obj, item, idx)
+                    if normalized_item:
+                        normalized_items.append(normalized_item)
+                except Exception as e:
+                    logger.warning(f"Failed to normalize object_filters['{obj}'][{idx}]: {e}")
+                    continue
+            
+            if normalized_items:
+                norm[obj] = normalized_items
+                logger.info(f"Object filter '{obj}': {len(normalized_items)} constraints normalized")
+            else:
+                logger.warning(f"No valid constraints for object '{obj}', skipping")
                 
         return norm
+
+    def _normalize_single_object_constraint(self, obj_name: str, item: Any, index: int) -> Optional[Dict]:
+        """
+        Normalize a single object constraint item.
+        Supports flexible input formats:
+        
+        Input formats:
+        - [] -> object-only search  
+        - [L, a, b] -> color constraint (LAB or RGB auto-detected)
+        - [x1, y1, x2, y2] -> bbox constraint
+        - [[L, a, b], [x1, y1, x2, y2]] -> full constraint
+        - {"color": [L, a, b], "bbox": [x1, y1, x2, y2]} -> dict format
+        """
+        
+        if not isinstance(item, (list, tuple, dict)):
+            return None
+            
+        # Handle dict format
+        if isinstance(item, dict):
+            return self._normalize_dict_constraint(item)
+            
+        # Handle list/tuple formats
+        if len(item) == 0:
+            return {'type': 'object_only'}
+            
+        elif len(item) == 3:
+            # Could be color [L,a,b] or [R,G,B]
+            try:
+                color_vals = [float(x) for x in item]
+                # Auto-detect RGB vs LAB
+                if all(0 <= x <= 255 for x in color_vals) and any(x > 1 for x in color_vals):
+                    # Likely RGB, convert to LAB
+                    lab_color = self._rgb_to_lab(tuple(int(x) for x in color_vals))
+                    return {
+                        'type': 'color_only',
+                        'color_lab': lab_color,
+                        'color_original': tuple(color_vals),
+                        'color_space': 'RGB->LAB'
+                    }
+                else:
+                    # Assume LAB
+                    return {
+                        'type': 'color_only', 
+                        'color_lab': tuple(color_vals),
+                        'color_original': tuple(color_vals),
+                        'color_space': 'LAB'
+                    }
+            except (ValueError, TypeError):
+                return None
+                
+        elif len(item) == 4:
+            # Bbox [x1, y1, x2, y2]
+            try:
+                bbox_vals = [int(x) for x in item]
+                return {
+                    'type': 'bbox_only',
+                    'bbox': tuple(bbox_vals)
+                }
+            except (ValueError, TypeError):
+                return None
+                
+        elif len(item) == 2:
+            # Full constraint [[color], [bbox]]
+            color_part, bbox_part = item[0], item[1]
+            
+            # Validate color part
+            if not isinstance(color_part, (list, tuple)) or len(color_part) != 3:
+                return None
+            # Validate bbox part  
+            if not isinstance(bbox_part, (list, tuple)) or len(bbox_part) != 4:
+                return None
+                
+            try:
+                color_vals = [float(x) for x in color_part]
+                bbox_vals = [int(x) for x in bbox_part]
+                
+                # Auto-detect color space
+                if all(0 <= x <= 255 for x in color_vals) and any(x > 1 for x in color_vals):
+                    lab_color = self._rgb_to_lab(tuple(int(x) for x in color_vals))
+                    color_space = 'RGB->LAB'
+                else:
+                    lab_color = tuple(color_vals)
+                    color_space = 'LAB'
+                    
+                return {
+                    'type': 'full_constraint',
+                    'color_lab': lab_color,
+                    'color_original': tuple(color_vals),
+                    'color_space': color_space,
+                    'bbox': tuple(bbox_vals)
+                }
+            except (ValueError, TypeError):
+                return None
+        
+        return None
+    
+    def _normalize_dict_constraint(self, item: Dict) -> Optional[Dict]:
+        """Handle dict-based constraint format"""
+        result = {'type': 'mixed'}
+        
+        # Handle color
+        if 'color' in item:
+            color = item['color']
+            if isinstance(color, (list, tuple)) and len(color) == 3:
+                try:
+                    color_vals = [float(x) for x in color]
+                    if all(0 <= x <= 255 for x in color_vals) and any(x > 1 for x in color_vals):
+                        result['color_lab'] = self._rgb_to_lab(tuple(int(x) for x in color_vals))
+                        result['color_space'] = 'RGB->LAB'
+                    else:
+                        result['color_lab'] = tuple(color_vals)
+                        result['color_space'] = 'LAB'
+                    result['color_original'] = tuple(color_vals)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Handle bbox
+        if 'bbox' in item:
+            bbox = item['bbox']
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    result['bbox'] = tuple(int(x) for x in bbox)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Determine final type
+        has_color = 'color_lab' in result
+        has_bbox = 'bbox' in result
+        
+        if has_color and has_bbox:
+            result['type'] = 'full_constraint'
+        elif has_color:
+            result['type'] = 'color_only'
+        elif has_bbox:
+            result['type'] = 'bbox_only'
+        else:
+            result['type'] = 'object_only'
+            
+        return result
+
+    def _apply_comprehensive_object_matching(self, constraint_list: List[Dict], obj_hits: List[Dict], 
+                                           obj_label: str) -> Tuple[float, List[str]]:
+        """
+        Apply comprehensive object matching supporting all constraint types.
+        Returns (final_boost, match_details)
+        """
+        if not constraint_list or not obj_hits:
+            return 0.0, []
+            
+        # Parse object hits data
+        O_vec_sim = []
+        O_color_lab = []
+        O_bbox = []
+        
+        for hit in obj_hits:
+            ent = hit.get("entity", {})
+            distance = float(hit.get("distance", 0.0))
+            vec_similarity = 1.0 / (1.0 + distance)
+            O_vec_sim.append(vec_similarity)
+            
+            # Parse color
+            color_csv = ent.get("color_lab", "")
+            color_vals = self._split_csv_floats(color_csv)
+            O_color_lab.append(tuple(color_vals) if len(color_vals) == 3 else None)
+            
+            # Parse bbox
+            bbox_csv = ent.get("bbox_xyxy", "")
+            bbox_vals = self._split_csv_floats(bbox_csv)
+            O_bbox.append(tuple(int(x) for x in bbox_vals) if len(bbox_vals) == 4 else None)
+        
+        n_objects = len(O_vec_sim)
+        if n_objects == 0:
+            return 0.0, []
+        
+        # Process each constraint type
+        constraint_results = []
+        match_details = []
+        
+        for idx, constraint in enumerate(constraint_list):
+            constraint_type = constraint.get('type', 'unknown')
+            
+            if constraint_type == 'object_only':
+                boost, detail = self._match_object_only(O_vec_sim, obj_label)
+                
+            elif constraint_type == 'color_only':
+                boost, detail = self._match_color_only(
+                    constraint, O_vec_sim, O_color_lab, obj_label
+                )
+                
+            elif constraint_type == 'bbox_only':
+                boost, detail = self._match_bbox_only(
+                    constraint, O_vec_sim, O_bbox, obj_label
+                )
+                
+            elif constraint_type == 'full_constraint':
+                boost, detail = self._match_full_constraint(
+                    constraint, O_vec_sim, O_color_lab, O_bbox, obj_label
+                )
+                
+            else:
+                logger.warning(f"Unknown constraint type: {constraint_type}")
+                continue
+            
+            if boost > 0:
+                constraint_results.append(boost)
+                match_details.append(detail)
+                
+        # Aggregate results - use max boost to avoid over-boosting
+        final_boost = max(constraint_results) if constraint_results else 0.0
+        
+        return final_boost, match_details
+    
+    def _match_object_only(self, vec_similarities: List[float], obj_label: str) -> Tuple[float, str]:
+        """Match object without any constraints - pure semantic similarity"""
+        if not vec_similarities:
+            return 0.0, ""
+            
+        max_similarity = max(vec_similarities)
+        
+        # Object-only boost weights
+        W_OBJ_ONLY = 0.15
+        SIMILARITY_THRESHOLD = 0.5
+        
+        if max_similarity >= SIMILARITY_THRESHOLD:
+            boost = W_OBJ_ONLY * max_similarity
+            detail = f"Object '{obj_label}' match +{boost:.3f} (similarity={max_similarity:.3f})"
+            return boost, detail
+        
+        return 0.0, ""
+    
+    def _match_color_only(self, constraint: Dict, vec_similarities: List[float], 
+                         object_colors: List[Optional[Tuple]], obj_label: str) -> Tuple[float, str]:
+        """Match object with color constraint only"""
+        query_color = constraint.get('color_lab')
+        if not query_color or not vec_similarities:
+            return 0.0, ""
+        
+        # Find best matching object by color + vector similarity
+        best_combined_score = 0.0
+        best_vec_sim = 0.0
+        best_color_sim = 0.0
+        
+        W_VEC = 0.6
+        W_COLOR = 0.4
+        MAX_DELTA_E = 50.0
+        SIGMA_COLOR = 20.0
+        
+        for i, (vec_sim, obj_color) in enumerate(zip(vec_similarities, object_colors)):
+            if obj_color is None:
+                continue
+                
+            # Color similarity
+            color_distance = self._compare_color(query_color, obj_color)
+            if color_distance <= MAX_DELTA_E:
+                color_sim = np.exp(-(color_distance / SIGMA_COLOR) ** 2)
+                combined_score = W_VEC * vec_sim + W_COLOR * color_sim
+                
+                if combined_score > best_combined_score:
+                    best_combined_score = combined_score
+                    best_vec_sim = vec_sim
+                    best_color_sim = color_sim
+        
+        if best_combined_score > 0.5:
+            W_COLOR_ONLY = 0.12
+            boost = W_COLOR_ONLY * best_combined_score
+            detail = f"Object '{obj_label}' color match +{boost:.3f} (vec={best_vec_sim:.3f}, color={best_color_sim:.3f})"
+            return boost, detail
+            
+        return 0.0, ""
+    
+    def _match_bbox_only(self, constraint: Dict, vec_similarities: List[float],
+                        object_bboxes: List[Optional[Tuple]], obj_label: str) -> Tuple[float, str]:
+        """Match object with bbox constraint only"""
+        query_bbox = constraint.get('bbox')
+        if not query_bbox or not vec_similarities:
+            return 0.0, ""
+        
+        best_combined_score = 0.0
+        best_vec_sim = 0.0
+        best_iou = 0.0
+        
+        W_VEC = 0.7
+        W_BBOX = 0.3
+        MIN_IOU = 0.3
+        
+        for i, (vec_sim, obj_bbox) in enumerate(zip(vec_similarities, object_bboxes)):
+            if obj_bbox is None:
+                continue
+                
+            iou = self._compare_bbox(query_bbox, obj_bbox)
+            if iou >= MIN_IOU:
+                combined_score = W_VEC * vec_sim + W_BBOX * iou
+                
+                if combined_score > best_combined_score:
+                    best_combined_score = combined_score
+                    best_vec_sim = vec_sim
+                    best_iou = iou
+        
+        if best_combined_score > 0.5:
+            W_BBOX_ONLY = 0.10
+            boost = W_BBOX_ONLY * best_combined_score
+            detail = f"Object '{obj_label}' bbox match +{boost:.3f} (vec={best_vec_sim:.3f}, IoU={best_iou:.3f})"
+            return boost, detail
+            
+        return 0.0, ""
+    
+    def _match_full_constraint(self, constraint: Dict, vec_similarities: List[float],
+                             object_colors: List[Optional[Tuple]], 
+                             object_bboxes: List[Optional[Tuple]], obj_label: str) -> Tuple[float, str]:
+        """Match object with both color and bbox constraints"""
+        query_color = constraint.get('color_lab')
+        query_bbox = constraint.get('bbox')
+        
+        if not query_color or not query_bbox or not vec_similarities:
+            return 0.0, ""
+        
+        best_combined_score = 0.0
+        best_details = {}
+        
+        W_VEC = 0.5
+        W_COLOR = 0.3
+        W_BBOX = 0.2
+        MAX_DELTA_E = 50.0
+        SIGMA_COLOR = 20.0
+        MIN_IOU = 0.3
+        
+        for i, (vec_sim, obj_color, obj_bbox) in enumerate(zip(vec_similarities, object_colors, object_bboxes)):
+            if obj_color is None or obj_bbox is None:
+                continue
+                
+            # Color similarity
+            color_distance = self._compare_color(query_color, obj_color)
+            if color_distance > MAX_DELTA_E:
+                continue
+            color_sim = np.exp(-(color_distance / SIGMA_COLOR) ** 2)
+            
+            # Bbox similarity
+            iou = self._compare_bbox(query_bbox, obj_bbox)
+            if iou < MIN_IOU:
+                continue
+                
+            # Combined score
+            combined_score = W_VEC * vec_sim + W_COLOR * color_sim + W_BBOX * iou
+            
+            if combined_score > best_combined_score:
+                best_combined_score = combined_score
+                best_details = {
+                    'vec_sim': vec_sim,
+                    'color_sim': color_sim,
+                    'iou': iou,
+                    'color_distance': color_distance
+                }
+        
+        if best_combined_score > 0.6:  # Higher threshold for full constraint
+            W_FULL = 0.20
+            boost = W_FULL * best_combined_score
+            detail = f"Object '{obj_label}' full match +{boost:.3f} (vec={best_details.get('vec_sim', 0):.3f}, color={best_details.get('color_sim', 0):.3f}, IoU={best_details.get('iou', 0):.3f})"
+            return boost, detail
+            
+        return 0.0, ""
 
     def _normalize_text(self, s: str) -> str:
         """Normalize text for fuzzy matching."""
@@ -1038,6 +1371,30 @@ class HybridRetriever:
 
     def check_elasticsearch_connection(self) -> Dict[str, Any]:
         return self.db_manager.check_elasticsearch_connection()
+
+    # --- OPTIMIZATION MONITORING ---
+    def get_optimization_stats(self) -> Dict[str, Any]:
+        """Get optimization performance statistics."""
+        return {
+            'cache_stats': cache_manager.get_cache_stats(),
+            'precomputed_embeddings': len(self.precomputed_embeddings),
+            'vectorization_enabled': True,
+            'device': str(self.device),
+            'optimizations_active': [
+                'embedding_caching',
+                'search_result_caching', 
+                'vectorized_operations',
+                'precomputed_embeddings',
+                'parallel_processing'
+            ]
+        }
+
+    def clear_cache(self, cache_type: str = 'all'):
+        """Clear optimization caches."""
+        cache_manager.clear_cache(cache_type)
+        if cache_type in ['all', 'embeddings']:
+            self.precomputed_embeddings.clear()
+        logger.info(f"Cache cleared: {cache_type}")
 
 # --- END OF FILE app/retrieval_engine.py ---
                     

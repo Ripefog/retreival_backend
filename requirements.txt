@@ -38,6 +38,8 @@ rapidfuzz>=3.9.0
 scipy>=1.7.0  # For optimized Hungarian algorithm
 numpy>=1.21.0 # For vectorization
 colorspacious # For optimized CIEDE2000 color distance
+redis>=4.5.0  # For distributed caching
+hiredis>=2.0.0  # For faster Redis performance
 
 # Libraries from notebook (ít quan trọng hơn)
 moviepy
