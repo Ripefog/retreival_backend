@@ -32,9 +32,13 @@ class Settings(BaseSettings):
     ELASTICSEARCH_VERIFY_CERTS: bool = False  # Thêm option này
     
     # --- Milvus Collection Names ---
-    CLIP_COLLECTION: str = 'arch_clip_image_v100'
-    BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
-    OBJECT_COLLECTION: str = 'arch_object_name_v100'
+    # CLIP_COLLECTION: str = 'arch_clip_image_v100'
+    # BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
+    # OBJECT_COLLECTION: str = 'arch_object_name_v100'
+    #
+    CLIP_COLLECTION: str = 'arch_clip_image_v404'
+    BEIT3_COLLECTION: str = 'arch_beit3_image_v404'
+    OBJECT_COLLECTION: str = 'arch_object_name_v404'
     
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
@@ -78,6 +82,11 @@ class Settings(BaseSettings):
             "port": self.MILVUS_PORT,
             "alias": self.MILVUS_ALIAS
         }
+        # params = {
+        #     "uri": "https://in05-8f8ff453c20db17.serverless.gcp-us-west1.cloud.zilliz.com",
+        #     "token": "2a79bf3c87e4db3cada8649a5c575642e355737c9ce0a956e94c26163248c5e5dd608b46982039760ca66ecbbdcca6610eb37b68",
+        #     "alias": self.MILVUS_ALIAS
+        # }
         
         # Chỉ thêm user/password nếu được cấu hình
         if self.MILVUS_USER:

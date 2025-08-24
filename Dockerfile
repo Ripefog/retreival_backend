@@ -44,10 +44,9 @@ RUN pip install --no-cache-dir /tmp/mmcv_full-1.7.0-cp38-cp38-manylinux1_x86_64.
 RUN mkdir -p /app/models
 
 # Tải các model từ nguồn công khai
-RUN wget https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/resolve/main/open_clip_pytorch_model.bin -O /app/models/clip_model.bin
-RUN wget https://github.com/addf400/files/releases/download/beit3/beit3.spm -O /app/models/beit3.spm
-RUN wget https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_384_coco_retrieval.pth -O /app/models/beit3_base_patch16_384_coco_retrieval.pth
-
+COPY open_clip_pytorch_model.bin /app/models/clip_model.bin
+COPY beit3.spm /app/models/beit3.spm
+COPY beit3_base_patch16_384_coco_retrieval.pth /app/models/beit3_base_patch16_384_coco_retrieval.pth
 # [CẬP NHẬT] Tải model Co-DETR từ Google Drive bằng gdown với File ID mới
 # File ID mới: 1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO
 #RUN gdown '1ffDz9lGNAjEF7iXzINZezZ4alx6S0KcO' -O /app/models/co_dino_5scale_swin_large_16e_o365tococo.pth

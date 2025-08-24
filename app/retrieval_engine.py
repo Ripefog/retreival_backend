@@ -489,29 +489,24 @@ class HybridRetriever:
             clip_vector = self.get_clip_text_embedding(text_query).tolist()
             tasks.append(self._search_milvus_async(settings.CLIP_COLLECTION, clip_vector, 
                                                   num_initial_candidates, None, user_query, 'clip'))
-        
         if mode == 'beit3':
             beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
             tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector, 
                                                   num_initial_candidates, None, user_query, 'beit3'))
-
         # OPTIMIZED: Parallel execution of vector searches
         search_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
         # Process search results
         for i, result in enumerate(search_results):
             if isinstance(result, Exception):
                 logger.error(f"Search task {i} failed: {result}")
                 continue
-                
+
             search_type = 'clip' if (mode in ['hybrid', 'clip'] and i == 0) else 'beit3'
             self._process_search_results(result, candidate_info, search_type)
-
         # BƯỚC 2: TINH CHỈNH (chỉ cho mode hybrid)
         refinement_tasks = []
         if mode == 'hybrid' and candidate_info:
             refinement_tasks.append(self._async_hybrid_reranking(candidate_info, text_query))
-
         # BƯỚC 3: TĂNG ĐIỂM với Object/Color (parallel)
         if object_filters or color_filters:
             refinement_tasks.append(self._apply_object_color_filters_optimized(
@@ -626,10 +621,7 @@ class HybridRetriever:
         hits = []
         for hit in search_results:
             hit_data = hit.entity.to_dict()["entity"]
-            user_db = hit_data.get("user") or ""
-            if user_query and user_query not in user_db.split(","):
-                continue
-                
+
             if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
                 raw_kf = hit_data.get("keyframe_id", "")
                 if isinstance(raw_kf, str):

@@ -36,6 +36,7 @@ class DatabaseManager:
         try:
             params = settings.get_milvus_connection_params()
             logger.info(f"Connecting to Milvus at {params['host']}:{params['port']} (User: {params.get('user', 'N/A')})...")
+            # logger.info(f"Connecting to Milvus at cloud")
 
             connections.connect(**params)
 
@@ -80,7 +81,6 @@ class DatabaseManager:
                 settings.CLIP_COLLECTION,
                 settings.BEIT3_COLLECTION,
                 settings.OBJECT_COLLECTION,
-                # settings.COLOR_COLLECTION
             ]
             
             for name in collection_names:
