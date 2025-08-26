@@ -391,7 +391,7 @@ class HybridRetriever:
 
     def _parse_video_id_from_kf(self, kf: str) -> Tuple[str, str]:
         """
-        Nhận keyframe: L02_L02_V002_1130.04s.jpg hoặc L02_V002_1130.04s.jpg
+        Nhận keyframe: L02_L02_V002_1130.04s.jpg, K05_V002_1130.04s.jpg, hoặc L02_V002_1130.04s.jpg
         Trả về: (video_id, kf_id) dạng ('L02_V002', 'L02_V002_1130.04s.jpg')
         """
         name = os.path.splitext(os.path.basename(kf))[0]
@@ -405,16 +405,18 @@ class HybridRetriever:
 
         # timestamp là phần cuối
         timestamp = unique_parts[-1]
-        # lấy Lxx và Vxxx
-        l_code = None
+        # lấy mã sequence (Lxx, Kxx, ...) và Vxxx
+        sequence_code = None
         v_code = None
         for p in unique_parts:
-            if p.upper().startswith("L") and p[1:].isdigit():
-                l_code = p.upper()
-            if p.upper().startswith("V") and p[1:].isdigit():
-                v_code = p.upper()
+            # Tìm pattern: chữ cái + số (ví dụ: L02, K05, M10, ...)
+            if len(p) >= 2 and p[0].isalpha() and p[1:].isdigit():
+                if p.upper().startswith("V"):
+                    v_code = p.upper()
+                elif sequence_code is None:  # Lấy mã sequence đầu tiên (L, K, M, ...)
+                    sequence_code = p.upper()
 
-        video_id = f"{l_code}_{v_code}"
+        video_id = f"{sequence_code}_{v_code}"
         kf_id = f"{video_id}_{timestamp}.jpg"
         return video_id, kf_id
 
@@ -546,7 +548,8 @@ class HybridRetriever:
         for hit in search_results:
             kf_id = hit["entity"]["keyframe_id"]
             vid, kf_id = self._parse_video_id_from_kf(kf_id)
-            score = 1.0 / (1.0 + hit['distance'])
+            #score = 1.0 / (1.0 + hit['distance'])
+            score = max(0.0, 1.0 - hit['distance'])  # COSINE distance in [0,2], similarity in [1,-1]
             obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
             lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
 
@@ -612,7 +615,7 @@ class HybridRetriever:
         search_results = collection.search(
             data=[vector],
             anns_field="vector",
-            param={"metric_type": "L2", "params": {"nprobe": 16}},
+            param={"metric_type": "COSINE", "params": {"nprobe": 16}},
             limit=top_k,
             expr=expr_new,
             output_fields=output_fields,
