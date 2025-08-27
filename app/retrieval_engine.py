@@ -497,7 +497,7 @@ class HybridRetriever:
         for hit in search_results:
             kf_id = hit["entity"]["keyframe_id"]
             vid, kf_id = self._parse_video_id_from_kf(kf_id)
-            score = 1.0 / (1.0 + hit['distance'])
+            score = max(0.0, 1.0 - hit['distance'])
             obj_ids = self._split_csv_ints(hit['entity']['object_ids'])
             lab6 = self._parse_lab_colors18(hit['entity']['lab_colors'])
 
@@ -563,7 +563,7 @@ class HybridRetriever:
         search_results = collection.search(
             data=[vector],
             anns_field="vector",
-            param={"metric_type": "L2", "params": {"nprobe": 16}},
+            param={"metric_type": "COSINE", "params": {"nprobe": 16}},
             limit=top_k,
             expr=expr_new,
             output_fields=output_fields,
