@@ -191,4 +191,99 @@ compare_examples = {
         "value": {"text_query": "a news anchor in a studio", "top_k": 5},
     }
 }
+
+# --- Temporal Search Models ---
+class TemporalQuery(BaseModel):
+    step: int = Field(..., description="Thứ tự bước trong sequence (1, 2, 3...)")
+    text_query: str = Field(..., description="Câu truy vấn cho bước này")
+
+class TemporalSearchRequest(BaseModel):
+    sequential_queries: List[TemporalQuery] = Field(..., description="Danh sách các query theo thứ tự thời gian")
+    mode: SearchMode = Field(default=SearchMode.HYBRID, description="Chế độ tìm kiếm")
+    object_filters: Optional[Dict[str, Any]] = Field(default=None, description="Object filters áp dụng cho tất cả queries")
+    color_filters: Optional[List[Any]] = Field(default=None, description="Color filters áp dụng cho tất cả queries")
+    ocr_query: Optional[str] = Field(default=None, description="OCR filter áp dụng cho tất cả queries")
+    asr_query: Optional[str] = Field(default=None, description="ASR filter áp dụng cho tất cả queries")
+    top_k_per_query: int = Field(default=50, ge=1, le=200, description="Số kết quả top cho mỗi query riêng lẻ")
+    max_time_gap: float = Field(default=300.0, ge=1.0, description="Khoảng cách thời gian tối đa giữa các bước (giây)")
+    min_time_gap: float = Field(default=1.0, ge=0.1, description="Khoảng cách thời gian tối thiểu giữa các bước (giây)")
+    top_sequences: int = Field(default=10, ge=1, le=50, description="Số sequence tốt nhất trả về")
+
+class TemporalStep(BaseModel):
+    step: int = Field(..., description="Số thứ tự bước")
+    keyframe_id: str = Field(..., description="ID của keyframe")
+    video_id: str = Field(..., description="ID của video")
+    timestamp: float = Field(..., description="Thời điểm trong video (giây)")
+    score: float = Field(..., description="Điểm relevancy của bước này")
+    text_query: str = Field(..., description="Query gốc cho bước này")
+
+class TemporalSequence(BaseModel):
+    sequence_id: int = Field(..., description="ID định danh của sequence")
+    video_id: str = Field(..., description="ID của video chứa sequence")
+    steps: List[TemporalStep] = Field(..., description="Danh sách các bước trong sequence")
+    sequence_score: float = Field(..., description="Điểm tổng hợp của toàn bộ sequence")
+    temporal_consistency: float = Field(..., description="Điểm nhất quán về thời gian")
+    time_gaps: List[float] = Field(..., description="Khoảng cách thời gian giữa các bước liên tiếp")
+    total_duration: float = Field(..., description="Tổng thời lượng của sequence")
+
+class TemporalSearchResponse(BaseModel):
+    sequential_queries: List[TemporalQuery] = Field(..., description="Danh sách queries đã xử lý")
+    query_results: List[List[Dict[str, Any]]] = Field(..., description="Kết quả riêng lẻ của từng query")
+    temporal_sequences: List[TemporalSequence] = Field(..., description="Danh sách sequences được tìm thấy")
+    total_sequences: int = Field(..., description="Tổng số sequences hợp lệ")
+    processing_time: float = Field(..., description="Thời gian xử lý (giây)")
+
+# Temporal search examples
+temporal_examples = {
+    "cooking_sequence": {
+        "summary": "Chuỗi nấu ăn: Cho cá vào tô → Trộn bột → Nhấc đũa",
+        "description": "Tìm kiếm chuỗi hành động nấu ăn theo thứ tự thời gian",
+        "value": {
+            "sequential_queries": [
+                {
+                    "step": 1,
+                    "text_query": "Người đầu bếp cho cá vào một tô màu trắng"
+                },
+                {
+                    "step": 2, 
+                    "text_query": "Người đầu bếp đổ bột vào một tô cá để chiên"
+                },
+                {
+                    "step": 3,
+                    "text_query": "Người đầu bếp dùng đũa để kiểm tra độ nóng của dầu"
+                }
+            ],
+            "mode": "hybrid",
+            "top_k_per_query": 30,
+            "max_time_gap": 180,
+            "min_time_gap": 3,
+            "top_sequences": 5
+        }
+    },
+    "news_sequence": {
+        "summary": "Chuỗi tin tức: MC giới thiệu → Phóng viên báo cáo → Kết thúc",
+        "description": "Tìm kiếm chuỗi hành động trong chương trình tin tức",
+        "value": {
+            "sequential_queries": [
+                {
+                    "step": 1,
+                    "text_query": "MC giới thiệu chủ đề tin tức"
+                },
+                {
+                    "step": 2,
+                    "text_query": "Phóng viên đưa tin tại hiện trường"
+                },
+                {
+                    "step": 3,
+                    "text_query": "MC kết thúc và chuyển sang tin khác"
+                }
+            ],
+            "mode": "hybrid",
+            "top_k_per_query": 20,
+            "max_time_gap": 300,
+            "min_time_gap": 5,
+            "top_sequences": 8
+        }
+    }
+}
 # --- END OF FILE app/models.py ---

@@ -19,8 +19,13 @@ from .models import (
     SearchResponse, 
     ImageObjectsResponse, 
     search_examples, 
-    compare_examples
+    compare_examples,
+    # Add temporal search models
+    TemporalSearchRequest,
+    TemporalSearchResponse,
+    temporal_examples
 )
+from .temporal_search import TemporalSearchEngine
 from typing import List, Dict, Any, Optional, Tuple, Set
 # Cấu hình logging cơ bản cho ứng dụng
 logging.basicConfig(
@@ -33,12 +38,15 @@ logger = logging.getLogger(__name__)
 from typing import Optional
 retriever: Optional[HybridRetriever] = None
 
+# Add global temporal engine variable
+temporal_engine: Optional[TemporalSearchEngine] = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Quản lý vòng đời của ứng dụng: khởi tạo tài nguyên khi bắt đầu và giải phóng khi kết thúc.
     """
-    global retriever
+    global retriever, temporal_engine
     logger.info("--- Application Startup ---")
     
     # 1. Kết nối cơ sở dữ liệu
@@ -47,6 +55,9 @@ async def lifespan(app: FastAPI):
     # 2. Khởi tạo và tải các mô hình AI
     retriever = HybridRetriever()
     await retriever.initialize()
+    
+    # 3. Khởi tạo temporal search engine
+    temporal_engine = TemporalSearchEngine(retriever)
     
     logger.info("✅ Application startup complete. Ready to accept requests.")
     
@@ -222,6 +233,30 @@ async def clear_optimization_cache(cache_type: str = "all"):
         "message": f"Cache cleared: {cache_type}",
         "cache_type": cache_type
     }
+
+@app.post("/search/temporal", response_model=TemporalSearchResponse, tags=["Search"])
+async def temporal_search(request: TemporalSearchRequest = Body(..., examples=temporal_examples)):
+    """
+    **Tìm kiếm chuỗi hành động theo thứ tự thời gian (Temporal Sequential Search)**
+    
+    Thực hiện tìm kiếm các chuỗi hành động liên tiếp trong cùng một video theo thứ tự thời gian.
+    Ví dụ: tìm chuỗi "đầu bếp cho cá vào tô" → "trộn bột" → "nhấc đũa ra khỏi dầu".
+    """
+    if not temporal_engine:
+        raise HTTPException(status_code=503, detail="Temporal search engine not initialized")
+    
+    try:
+        logger.info(f"Received temporal search request with {len(request.sequential_queries)} queries")
+        result = await temporal_engine.temporal_search(request)
+        return result
+        
+    except ValueError as e:
+        logger.error(f"Temporal search validation error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    except Exception as e:
+        logger.error(f"Temporal search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred during temporal search")
 
 if __name__ == "__main__":
     # Chạy server Uvicorn khi thực thi file này trực tiếp
