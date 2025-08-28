@@ -1,3 +1,4 @@
+# --- START OF FILE app/temporal_search.py ---
 
 import logging
 import time
@@ -101,26 +102,27 @@ class TemporalSearchEngine:
         logger.info(f"Executed {len(queries)} queries, got results: {[len(r) for r in results]}")
         return results
     
-    def _generate_candidate_sequences(
-        self,
-        query_results: List[List[Dict[str, Any]]],
-        queries: List[TemporalQuery],
-        request: TemporalSearchRequest
-    ) -> List[Dict[str, Any]]:
+    def _generate_candidate_sequences(self, query_results, queries, request):
         """
-        Tạo candidate sequences từ kết quả các query riêng lẻ
+        Tạo candidate sequences - mỗi video chỉ có 1 sequence với keyframe tốt nhất cho mỗi scene
         """
         # Group results by video_id for each query
         video_grouped_results = []
-        for results in query_results:
+        for i, results in enumerate(query_results):
             video_group = defaultdict(list)
             for result in results:
                 video_id = result.get('video_id', '')
+                if not video_id:
+                    keyframe_id = result.get('keyframe_id', '')
+                    video_id = self._extract_video_id_from_keyframe(keyframe_id)
+                    result['video_id'] = video_id
+                
                 if video_id:
                     video_group[video_id].append(result)
             video_grouped_results.append(video_group)
+            logger.info(f"Query {i+1}: Found {len(video_group)} videos with results")
         
-        # Find common videos across all queries
+        # Find common videos
         if not video_grouped_results:
             return []
         
@@ -130,32 +132,69 @@ class TemporalSearchEngine:
         
         logger.info(f"Found {len(common_videos)} videos with results for all queries")
         
-        # Generate sequences for each common video
+        # Generate ONE sequence per video using BEST keyframe for each scene
         candidate_sequences = []
         sequence_id = 1
         
         for video_id in common_videos:
-            # Get results for this video from all queries
-            video_results = [
-                video_grouped_results[i][video_id] 
-                for i in range(len(queries))
-            ]
+            # Get BEST keyframe from each query for this video
+            best_keyframes = []
             
-            # Generate all possible combinations
-            for combination in product(*video_results):
-                # Check temporal constraints
-                if self._validate_temporal_constraints(combination, request):
-                    sequence = {
-                        'sequence_id': sequence_id,
-                        'video_id': video_id,
-                        'combination': combination,
-                        'queries': queries
-                    }
-                    candidate_sequences.append(sequence)
-                    sequence_id += 1
+            for i, query in enumerate(queries):
+                video_results = video_grouped_results[i][video_id]
+                # Sort by score and take the best one
+                best_keyframe = max(video_results, key=lambda x: x.get('score', 0.0))
+                best_keyframes.append(best_keyframe)
+            
+            # Check temporal constraints with best keyframes
+            timestamps = [kf.get('timestamp', 0.0) for kf in best_keyframes]
+            logger.info(f"Video {video_id}: Best keyframes at {timestamps}")
+            
+            if self._validate_temporal_constraints(tuple(best_keyframes), request):
+                sequence = {
+                    'sequence_id': sequence_id,
+                    'video_id': video_id,
+                    'combination': tuple(best_keyframes),
+                    'queries': queries
+                }
+                candidate_sequences.append(sequence)
+                sequence_id += 1
+                logger.info(f"✅ Valid sequence for {video_id}: {timestamps}")
+            else:
+                logger.info(f"❌ Invalid temporal sequence for {video_id}: {timestamps}")
         
-        logger.info(f"Generated {len(candidate_sequences)} candidate sequences")
+        logger.info(f"Generated {len(candidate_sequences)} candidate sequences (1 per video)")
         return candidate_sequences
+    
+    def _extract_video_id_from_keyframe(self, keyframe_id: str) -> str:
+        """
+        Extract video_id từ keyframe_id theo pattern như K17_V020_0432.29s.jpg -> K17_V020
+        """
+        if not keyframe_id:
+            return ""
+        
+        # Remove file extension
+        name = keyframe_id.replace('.jpg', '').replace('.jpeg', '').replace('.png', '')
+        parts = name.split('_')
+        
+        if len(parts) < 2:
+            return ""
+        
+        # Find L/K pattern and V pattern
+        l_code = None
+        v_code = None
+        
+        for part in parts:
+            part_upper = part.upper()
+            if (part_upper.startswith('L') or part_upper.startswith('K')) and len(part) >= 2 and part[1:].isdigit():
+                l_code = part_upper
+            elif part_upper.startswith('V') and len(part) >= 2 and part[1:].isdigit():
+                v_code = part_upper
+        
+        if l_code and v_code:
+            return f"{l_code}_{v_code}"
+        
+        return ""
     
     def _validate_temporal_constraints(
         self,
@@ -274,3 +313,4 @@ class TemporalSearchEngine:
         # Return average consistency score
         return np.mean(gap_scores)
 
+# --- END OF FILE app/temporal_search.py ---

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     MILVUS_USER: str = "root"
     MILVUS_PASSWORD: str = "aiostorm"
     MILVUS_USE_SECURE: bool = False  # Thêm option này cho SSL/TLS
-    
+
     # --- Elasticsearch/OpenSearch Configuration ---
     ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
     ELASTICSEARCH_PORT: int = 10184
