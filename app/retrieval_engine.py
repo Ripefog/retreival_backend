@@ -344,7 +344,7 @@ class HybridRetriever:
 
     def _parse_video_id_from_kf(self, kf: str) -> Tuple[str, str]:
         """
-        Nhận keyframe: L02_L02_V002_1130.04s.jpg hoặc L02_V002_1130.04s.jpg
+        Nhận keyframe: L02_L02_V002_1130.04s.jpg, K05_V002_1130.04s.jpg, hoặc L02_V002_1130.04s.jpg
         Trả về: (video_id, kf_id) dạng ('L02_V002', 'L02_V002_1130.04s.jpg')
         """
         name = os.path.splitext(os.path.basename(kf))[0]
@@ -358,16 +358,18 @@ class HybridRetriever:
 
         # timestamp là phần cuối
         timestamp = unique_parts[-1]
-        # lấy Lxx và Vxxx
-        l_code = None
+        # lấy mã sequence (Lxx, Kxx, ...) và Vxxx
+        sequence_code = None
         v_code = None
         for p in unique_parts:
-            if p.upper().startswith("L") and p[1:].isdigit():
-                l_code = p.upper()
-            if p.upper().startswith("V") and p[1:].isdigit():
-                v_code = p.upper()
+            # Tìm pattern: chữ cái + số (ví dụ: L02, K05, M10, ...)
+            if len(p) >= 2 and p[0].isalpha() and p[1:].isdigit():
+                if p.upper().startswith("V"):
+                    v_code = p.upper()
+                elif sequence_code is None:  # Lấy mã sequence đầu tiên (L, K, M, ...)
+                    sequence_code = p.upper()
 
-        video_id = f"{l_code}_{v_code}"
+        video_id = f"{sequence_code}_{v_code}"
         kf_id = f"{video_id}_{timestamp}.jpg"
         return video_id, kf_id
 
@@ -782,9 +784,11 @@ class HybridRetriever:
                     if not obj_hits:
                         continue
 
-                    # Prepare queries (same as before)
+                    # Prepare queries with new flexible format
                     Q = []
-                    for (q_color, q_bbox) in queries:
+                    for query_dict in queries:
+                        q_color = query_dict.get("color")
+                        q_bbox = query_dict.get("bbox") 
                         q_lab = _ensure_lab(q_color) if q_color is not None else None
                         q_bb = tuple(q_bbox) if q_bbox is not None else None
                         Q.append((q_lab, q_bb))
@@ -822,7 +826,8 @@ class HybridRetriever:
                         use_color = (q_lab is not None)
                         use_bbox = (q_bb is not None)
 
-                        # Re-normalize weights
+                        # Re-normalize weights based on available constraints
+                        # For semantic-only queries, vector similarity gets full weight
                         w_sum = 0.0
                         wv = W_VEC if use_vec else 0.0
                         wc = W_COLOR if use_color else 0.0
@@ -830,8 +835,10 @@ class HybridRetriever:
                         w_sum = wv + wc + wb
                         
                         if w_sum == 0:
+                            # Fallback: if no constraints, skip this query
                             continue
-                            
+                        
+                        # Normalize weights to sum = 1    
                         wv /= w_sum
                         wc /= w_sum
                         wb /= w_sum
@@ -943,28 +950,100 @@ class HybridRetriever:
                         )
 
     def _normalize_object_filters(self, object_filters: Dict) -> Dict:
-        """Normalize and validate object filters."""
-        norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
+        """
+        Normalize and validate object filters with flexible input support.
         
-        for obj, items in object_filters.items():
-            fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
+        Supported formats:
+        1. "object_name": None or [] -> semantic only
+        2. "object_name": {"color": (L,A,B)} -> semantic + color
+        3. "object_name": {"bbox": (x1,y1,x2,y2)} -> semantic + spatial
+        4. "object_name": [{"color": (L,A,B), "bbox": (x1,y1,x2,y2)}, ...] -> full
+        5. "object_name": [(color, bbox), ...] -> backward compatibility
+        """
+        from typing import Optional, Union, List, Dict, Tuple
+        
+        # New internal format: object_name -> list of queries
+        # Each query: {"color": Optional[Tuple], "bbox": Optional[Tuple]}
+        norm: Dict[str, List[Dict[str, Optional[Tuple]]]] = {}
+        
+        for obj_name, obj_data in object_filters.items():
+            queries: List[Dict[str, Optional[Tuple]]] = []
             
-            for it in items:
-                if (not isinstance(it, (list, tuple))) or len(it) != 2:
-                    continue
-                    
-                lab, bbox = it[0], it[1]
-                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
-                    continue
-                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
-                    continue
-                    
-                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
-                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                fixed.append((lab_t, bbox_t))
+            # Case 1: None or empty list -> semantic only
+            if obj_data is None or (isinstance(obj_data, list) and len(obj_data) == 0):
+                queries.append({"color": None, "bbox": None})
                 
-            if fixed:
-                norm[obj] = fixed
+            # Case 2: Single dict with color/bbox
+            elif isinstance(obj_data, dict):
+                query = {"color": None, "bbox": None}
+                
+                # Extract color if present
+                if "color" in obj_data:
+                    color_data = obj_data["color"]
+                    if isinstance(color_data, (list, tuple)) and len(color_data) == 3:
+                        try:
+                            query["color"] = (float(color_data[0]), float(color_data[1]), float(color_data[2]))
+                        except (ValueError, TypeError):
+                            continue
+                
+                # Extract bbox if present
+                if "bbox" in obj_data:
+                    bbox_data = obj_data["bbox"]
+                    if isinstance(bbox_data, (list, tuple)) and len(bbox_data) == 4:
+                        try:
+                            query["bbox"] = (int(bbox_data[0]), int(bbox_data[1]), int(bbox_data[2]), int(bbox_data[3]))
+                        except (ValueError, TypeError):
+                            continue
+                
+                queries.append(query)
+                
+            # Case 3: List of queries
+            elif isinstance(obj_data, list):
+                for item in obj_data:
+                    # New format: dict with color/bbox keys
+                    if isinstance(item, dict):
+                        query = {"color": None, "bbox": None}
+                        
+                        if "color" in item:
+                            color_data = item["color"]
+                            if isinstance(color_data, (list, tuple)) and len(color_data) == 3:
+                                try:
+                                    query["color"] = (float(color_data[0]), float(color_data[1]), float(color_data[2]))
+                                except (ValueError, TypeError):
+                                    continue
+                        
+                        if "bbox" in item:
+                            bbox_data = item["bbox"]
+                            if isinstance(bbox_data, (list, tuple)) and len(bbox_data) == 4:
+                                try:
+                                    query["bbox"] = (int(bbox_data[0]), int(bbox_data[1]), int(bbox_data[2]), int(bbox_data[3]))
+                                except (ValueError, TypeError):
+                                    continue
+                        
+                        queries.append(query)
+                        
+                    # Backward compatibility: old format (color, bbox)
+                    elif isinstance(item, (list, tuple)) and len(item) == 2:
+                        lab, bbox = item[0], item[1]
+                        query = {"color": None, "bbox": None}
+                        
+                        if isinstance(lab, (list, tuple)) and len(lab) == 3:
+                            try:
+                                query["color"] = (float(lab[0]), float(lab[1]), float(lab[2]))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                            try:
+                                query["bbox"] = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        queries.append(query)
+            
+            # Only add if we have valid queries
+            if queries:
+                norm[obj_name] = queries
                 
         return norm
 
