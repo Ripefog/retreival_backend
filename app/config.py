@@ -9,12 +9,13 @@ import torch
 # Thiết lập logger cho module này
 logger = logging.getLogger(__name__)
 
+
 class Settings(BaseSettings):
     """
     Quản lý tập trung tất cả các cấu hình cho ứng dụng.
     Sử dụng Pydantic để tự động đọc từ biến môi trường hoặc file .env.
     """
-    
+
     # --- Milvus Configuration ---
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
     MILVUS_PORT: int = 15380
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     ELASTICSEARCH_PASSWORD: str = "aiostorm"
     ELASTICSEARCH_USE_SSL: bool = False
     ELASTICSEARCH_VERIFY_CERTS: bool = False  # Thêm option này
-    
+
     # --- Milvus Collection Names ---
     CLIP_COLLECTION: str = 'arch_clip_image_v100'
     BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
@@ -39,37 +40,39 @@ class Settings(BaseSettings):
     # CLIP_COLLECTION: str = 'arch_clip_image_v404'
     # BEIT3_COLLECTION: str = 'arch_beit3_image_v404'
     # OBJECT_COLLECTION: str = 'arch_object_name_v404'
-    
+
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
     OCR_INDEX: str = 'ocr_v6'
     ASR_INDEX: str = 'video_transcripts_v6'
-    
+
     # --- Model Paths ---
     CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "models/clip_model.bin")
     BEIT3_MODEL_PATH: str = os.environ.get("BEIT3_MODEL_PATH", "models/beit3_base_patch16_384_coco_retrieval.pth")
     BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "models/beit3.spm")
-    CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH", "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
-    CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH", "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
+    CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH",
+                                              "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
+    CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH",
+                                                  "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
 
     # --- Model & Processing Configuration ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     # --- Search Configuration ---
     DEFAULT_TOP_K: int = 10
     MAX_TOP_K: int = 100
-    
+
     # --- API Configuration ---
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     API_RELOAD: bool = True
-    
+
     # --- Cache Configuration ---
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     ENABLE_REDIS_CACHE: bool = True
-    
+
     class Config:
         env_file = ".env"
         case_sensitive = True
@@ -87,7 +90,7 @@ class Settings(BaseSettings):
         #     "token": "2a79bf3c87e4db3cada8649a5c575642e355737c9ce0a956e94c26163248c5e5dd608b46982039760ca66ecbbdcca6610eb37b68",
         #     "alias": self.MILVUS_ALIAS
         # }
-        
+
         # Chỉ thêm user/password nếu được cấu hình
         if self.MILVUS_USER:
             params["user"] = self.MILVUS_USER
@@ -95,19 +98,20 @@ class Settings(BaseSettings):
             params["password"] = self.MILVUS_PASSWORD
         if self.MILVUS_USE_SECURE:
             params["secure"] = self.MILVUS_USE_SECURE
-            
+
         return params
-    
+
     def get_elasticsearch_connection_params(self) -> dict:
         """Trả về dictionary chứa các tham số kết nối Elasticsearch."""
         params = {
             "hosts": [f"{self.ELASTICSEARCH_HOST}:{self.ELASTICSEARCH_PORT}"],
-            "http_auth": (self.ELASTICSEARCH_USERNAME, self.ELASTICSEARCH_PASSWORD) if self.ELASTICSEARCH_USERNAME and self.ELASTICSEARCH_PASSWORD else None,
+            "http_auth": (self.ELASTICSEARCH_USERNAME,
+                          self.ELASTICSEARCH_PASSWORD) if self.ELASTICSEARCH_USERNAME and self.ELASTICSEARCH_PASSWORD else None,
             "use_ssl": self.ELASTICSEARCH_USE_SSL,
             "verify_certs": self.ELASTICSEARCH_VERIFY_CERTS,
             "ssl_show_warn": False
         }
-        
+
         # Loại bỏ các giá trị None
         return {k: v for k, v in params.items() if v is not None}
 
@@ -120,7 +124,7 @@ class Settings(BaseSettings):
         if not self.MILVUS_USER or not self.MILVUS_PASSWORD:
             logger.warning("Milvus authentication not configured. Using default connection.")
         return True
-    
+
     def check_elasticsearch_config(self) -> bool:
         """Kiểm tra cấu hình Elasticsearch."""
         if not self.ELASTICSEARCH_HOST or not self.ELASTICSEARCH_PORT:
@@ -146,6 +150,7 @@ class Settings(BaseSettings):
                 all_exist = False
         return all_exist
 
+
 # Tạo instance settings
 settings = Settings()
 
@@ -153,7 +158,8 @@ settings = Settings()
 logger.info("--- Application Configuration Loaded ---")
 logger.info(f"Device: {settings.DEVICE.upper()}")
 logger.info(f"Milvus: {settings.MILVUS_HOST}:{settings.MILVUS_PORT} (User: {settings.MILVUS_USER})")
-logger.info(f"Elasticsearch: {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT} (User: {settings.ELASTICSEARCH_USERNAME})")
+logger.info(
+    f"Elasticsearch: {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT} (User: {settings.ELASTICSEARCH_USERNAME})")
 logger.info(f"API: http://{settings.API_HOST}:{settings.API_PORT}")
 logger.info("------------------------------------")
 

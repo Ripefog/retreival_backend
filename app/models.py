@@ -7,8 +7,8 @@ from typing import List, Dict, Any, Optional, Tuple, Set, Union
 
 ObjectItem = Union[
     Tuple[Tuple[float, float, float], Tuple[int, int, int, int]],  # ((LAB),(BBOX))
-    Tuple[float, float, float],                                    # LAB
-    Tuple[int, int, int, int]                                      # BBOX
+    Tuple[float, float, float],  # LAB
+    Tuple[int, int, int, int]  # BBOX
 ]
 
 
@@ -18,6 +18,7 @@ class SearchMode(str, Enum):
     CLIP = "clip"
     BEIT3 = "beit3"
 
+
 # --- API Request Models ---
 class SearchRequest(BaseModel):
     text_query: str = Field(..., description="Câu truy vấn ngữ nghĩa bằng ngôn ngữ tự nhiên để tìm kiếm video.")
@@ -26,7 +27,7 @@ class SearchRequest(BaseModel):
     object_filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description="""Từ điển: tên đối tượng -> danh sách constraints để tăng điểm ưu tiên. 
-        
+
         Supported formats:
         - Empty array: object-only search -> {"person": []}
         - Color only: [R,G,B] or [L,a,b] -> {"person": [[255,0,0]]}  
@@ -34,7 +35,7 @@ class SearchRequest(BaseModel):
         - Full constraint: [[color], [bbox]] -> {"person": [[[255,0,0], [100,100,200,200]]]}
         - Dict format: {"person": [{"color": [255,0,0], "bbox": [100,100,200,200]}]}
         - Mixed: {"person": [[], [255,0,0], [[255,0,0], [100,100,200,200]]]}
-        
+
         Color auto-detection: RGB (0-255) hoặc LAB space."""
     )
 
@@ -46,13 +47,15 @@ class SearchRequest(BaseModel):
     ocr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các keyframe có chứa văn bản này (OCR).")
     asr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các video có chứa lời thoại này (ASR).")
     top_k: int = Field(default=20, ge=1, le=2000, description="Số lượng kết quả hàng đầu để trả về.")
-    #exact_match: bool = Field(default=False, description="Chế độ exact matching: ưu tiên kết quả có object/color filters khớp chính xác.")
+    # exact_match: bool = Field(default=False, description="Chế độ exact matching: ưu tiên kết quả có object/color filters khớp chính xác.")
+
 
 # --- API Response Models ---
 class SearchResultMetadata(BaseModel):
     rank: int = Field(..., description="Thứ hạng của kết quả.")
     clip_score: Optional[float] = Field(default=None, description="Điểm tương đồng từ mô hình CLIP (nếu có).")
     beit3_score: Optional[float] = Field(default=None, description="Điểm tương đồng từ mô hình BEiT-3 (nếu có).")
+
 
 class SearchResult(BaseModel):
     keyframe_id: str = Field(..., description="ID định danh duy nhất của keyframe.")
@@ -62,15 +65,20 @@ class SearchResult(BaseModel):
     reasons: List[str] = Field(default=[], description="Giải thích ngắn gọn tại sao kết quả này được trả về.")
     metadata: SearchResultMetadata = Field(..., description="Metadata bổ sung về điểm số và xếp hạng.")
 
+
 class SearchResponse(BaseModel):
     query: str = Field(..., description="Câu truy vấn gốc đã được xử lý.")
     mode: SearchMode = Field(..., description="Chế độ tìm kiếm đã được sử dụng.")
     results: List[SearchResult] = Field(..., description="Danh sách các kết quả tìm kiếm được.")
     total_results: int = Field(..., description="Tổng số kết quả được trả về.")
 
+
 class ImageObjectsResponse(BaseModel):
-    objects: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = Field(..., description="Danh sách các nhãn đối tượng duy nhất được phát hiện trong ảnh.")
-    colors: List[Tuple[float, float, float]] = Field(..., description="Danh sách các màu sắc chính duy nhất được phát hiện trong ảnh.")
+    objects: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = Field(...,
+                                                                                                   description="Danh sách các nhãn đối tượng duy nhất được phát hiện trong ảnh.")
+    colors: List[Tuple[float, float, float]] = Field(...,
+                                                     description="Danh sách các màu sắc chính duy nhất được phát hiện trong ảnh.")
+
 
 # --- Examples for Swagger UI documentation ---
 # --- Examples for Swagger UI documentation ---
@@ -113,7 +121,7 @@ search_examples = {
         },
     },
     "bbox_constraint": {
-        "summary": "4. Spatial constraint (NEW FORMAT)",  
+        "summary": "4. Spatial constraint (NEW FORMAT)",
         "description": "Tìm object 'person' trong vùng trung tâm màn hình.",
         "value": {
             "text_query": "person in the center of the frame",
@@ -183,7 +191,6 @@ search_examples = {
     },
 }
 
-
 compare_examples = {
     "default": {
         "summary": "So sánh các chế độ tìm kiếm",
@@ -192,15 +199,18 @@ compare_examples = {
     }
 }
 
+
 # --- Temporal Search Models ---
 class TemporalQuery(BaseModel):
     step: int = Field(..., description="Thứ tự bước trong sequence (1, 2, 3...)")
     text_query: str = Field(..., description="Câu truy vấn cho bước này")
 
+
 class TemporalSearchRequest(BaseModel):
     sequential_queries: List[TemporalQuery] = Field(..., description="Danh sách các query theo thứ tự thời gian")
     mode: SearchMode = Field(default=SearchMode.HYBRID, description="Chế độ tìm kiếm")
-    object_filters: Optional[Dict[str, Any]] = Field(default=None, description="Object filters áp dụng cho tất cả queries")
+    object_filters: Optional[Dict[str, Any]] = Field(default=None,
+                                                     description="Object filters áp dụng cho tất cả queries")
     color_filters: Optional[List[Any]] = Field(default=None, description="Color filters áp dụng cho tất cả queries")
     ocr_query: Optional[str] = Field(default=None, description="OCR filter áp dụng cho tất cả queries")
     asr_query: Optional[str] = Field(default=None, description="ASR filter áp dụng cho tất cả queries")
@@ -209,6 +219,7 @@ class TemporalSearchRequest(BaseModel):
     min_time_gap: float = Field(default=1.0, ge=0.1, description="Khoảng cách thời gian tối thiểu giữa các bước (giây)")
     top_sequences: int = Field(default=10, ge=1, le=50, description="Số sequence tốt nhất trả về")
 
+
 class TemporalStep(BaseModel):
     step: int = Field(..., description="Số thứ tự bước")
     keyframe_id: str = Field(..., description="ID của keyframe")
@@ -216,6 +227,7 @@ class TemporalStep(BaseModel):
     timestamp: float = Field(..., description="Thời điểm trong video (giây)")
     score: float = Field(..., description="Điểm relevancy của bước này")
     text_query: str = Field(..., description="Query gốc cho bước này")
+
 
 class TemporalSequence(BaseModel):
     sequence_id: int = Field(..., description="ID định danh của sequence")
@@ -226,12 +238,14 @@ class TemporalSequence(BaseModel):
     time_gaps: List[float] = Field(..., description="Khoảng cách thời gian giữa các bước liên tiếp")
     total_duration: float = Field(..., description="Tổng thời lượng của sequence")
 
+
 class TemporalSearchResponse(BaseModel):
     sequential_queries: List[TemporalQuery] = Field(..., description="Danh sách queries đã xử lý")
     query_results: List[List[Dict[str, Any]]] = Field(..., description="Kết quả riêng lẻ của từng query")
     temporal_sequences: List[TemporalSequence] = Field(..., description="Danh sách sequences được tìm thấy")
     total_sequences: int = Field(..., description="Tổng số sequences hợp lệ")
     processing_time: float = Field(..., description="Thời gian xử lý (giây)")
+
 
 # Temporal search examples
 temporal_examples = {
@@ -245,7 +259,7 @@ temporal_examples = {
                     "text_query": "Người đầu bếp cho cá vào một tô màu trắng"
                 },
                 {
-                    "step": 2, 
+                    "step": 2,
                     "text_query": "Người đầu bếp đổ bột vào một tô cá để chiên"
                 },
                 {
