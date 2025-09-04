@@ -73,14 +73,6 @@ class SearchResponse(BaseModel):
     total_results: int = Field(..., description="Tổng số kết quả được trả về.")
 
 
-class ImageObjectsResponse(BaseModel):
-    objects: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = Field(...,
-                                                                                                   description="Danh sách các nhãn đối tượng duy nhất được phát hiện trong ảnh.")
-    colors: List[Tuple[float, float, float]] = Field(...,
-                                                     description="Danh sách các màu sắc chính duy nhất được phát hiện trong ảnh.")
-
-
-# --- Examples for Swagger UI documentation ---
 # --- Examples for Swagger UI documentation ---
 search_examples = {
     "simple_hybrid": {

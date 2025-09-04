@@ -43,7 +43,7 @@ class DatabaseManager:
             if connections.has_connection(settings.MILVUS_ALIAS):
                 self.milvus_connected = True
                 logger.info("✅ Milvus connected.")
-                await self._load_milvus_collections()
+                # await self._load_milvus_collections() có lỗi gì thì check ở đây
             else:
                 logger.error("❌ Milvus connection could not be established.")
                 self.milvus_connected = False
