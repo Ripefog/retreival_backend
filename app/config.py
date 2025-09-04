@@ -33,18 +33,18 @@ class Settings(BaseSettings):
     ELASTICSEARCH_VERIFY_CERTS: bool = False  # Thêm option này
 
     # --- Milvus Collection Names ---
-    CLIP_COLLECTION: str = 'arch_clip_image_v100'
-    BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
-    OBJECT_COLLECTION: str = 'arch_object_name_v100'
+    # CLIP_COLLECTION: str = 'arch_clip_image_v100'
+    # BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
+    # OBJECT_COLLECTION: str = 'arch_object_name_v100'
     #
-    # CLIP_COLLECTION: str = 'arch_clip_image_v404'
-    # BEIT3_COLLECTION: str = 'arch_beit3_image_v404'
-    # OBJECT_COLLECTION: str = 'arch_object_name_v404'
+    CLIP_COLLECTION: str = 'arch_clip_image_v404'
+    BEIT3_COLLECTION: str = 'arch_beit3_image_v404'
+    OBJECT_COLLECTION: str = 'arch_object_name_v404'
 
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
-    OCR_INDEX: str = 'ocr_v6'
-    ASR_INDEX: str = 'video_transcripts_v6'
+    OCR_INDEX: str = 'ocr_v100'
+    ASR_INDEX: str = 'video_transcripts_v100'
 
     # --- Model Paths ---
     CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "models/clip_model.bin")

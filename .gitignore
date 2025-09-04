@@ -1,3 +1,6 @@
+beit3.spm
+beit3_base_patch16_384_coco_retrieval.pth
+open_clip_pytorch_model.bin
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
