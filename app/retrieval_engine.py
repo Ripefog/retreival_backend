@@ -606,11 +606,12 @@ class HybridRetriever:
     async def _apply_object_color_filters_optimized(
             self,
             candidate_info: Dict[str, Dict[str, Any]],
-            object_filters: Optional[Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]],
+            object_filters: Optional[Dict[str, List[Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[int, int, int, int]]]]]],
             color_filters: Optional[List[Tuple[float, float, float]]],
             top_k: int
     ):
-        """OPTIMIZED: Parallel processing with vectorized operations and batch queries."""
+        """OPTIMIZED: Parallel processing with vectorized operations and batch queries.
+        Now supports 4 cases: only name, name+bbox, name+color, name+bbox+color"""
 
         # Performance parameters
         W_VEC = 0.6
@@ -638,6 +639,22 @@ class HybridRetriever:
             """Similarity from ΔE: exp(-(ΔE/σ)²)."""
             return np.exp(-(d / sigma) ** 2)
 
+        def _scale_bbox_k_to_l(bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+            """
+            Chuyển đổi bbox từ tỷ lệ K (1920x1080) sang tỷ lệ L (1280x720).
+            Scale factor: 1280/1920 = 2/3 cho width, 720/1080 = 2/3 cho height
+            """
+            x1, y1, x2, y2 = bbox
+            scale_x = 1280.0 / 1920.0  # 2/3
+            scale_y = 720.0 / 1080.0   # 2/3
+            
+            new_x1 = int(x1 * scale_x)
+            new_y1 = int(y1 * scale_y)
+            new_x2 = int(x2 * scale_x)
+            new_y2 = int(y2 * scale_y)
+            
+            return (new_x1, new_y1, new_x2, new_y2)
+
         # ===== OBJECT FILTERS =====
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
@@ -655,6 +672,18 @@ class HybridRetriever:
                         candidate_objects[kf_id] = obj_ids
                         all_object_ids.extend(obj_ids)
 
+                # Handle case 1: Only name (no bbox, no color) - use pure vector similarity
+                if not all_object_ids and all(q_color is None and q_bbox is None for q_color, q_bbox in queries):
+                    logger.info(f"Object filter '{obj_label}': Only name provided, using vector similarity boost")
+                    # Give a moderate boost for semantic name matching
+                    name_boost = W_OBJ * 0.5  # 50% of max object boost
+                    for kf_id, info in candidate_info.items():
+                        info["score"] += name_boost
+                        info.setdefault("reasons", []).append(
+                            f"Object name match: '{obj_label}' +{name_boost:.3f} (name-only)"
+                        )
+                    continue
+
                 if not all_object_ids:
                     continue
 
@@ -669,7 +698,7 @@ class HybridRetriever:
                     if not obj_hits:
                         continue
 
-                    # Prepare queries (same as before)
+                    # Prepare queries - now supports partial information
                     Q = []
                     for (q_color, q_bbox) in queries:
                         q_lab = _ensure_lab(q_color) if q_color is not None else None
@@ -685,6 +714,9 @@ class HybridRetriever:
                     O_color_lab = []
                     O_bbox = []
 
+                    # Kiểm tra xem keyframe có bắt đầu bằng K không
+                    is_k_keyframe = kf_id.upper().startswith('K')
+
                     for h in obj_hits:
                         ent = h.get("entity", {})
                         d = float(h.get("distance", 0.0))
@@ -694,7 +726,15 @@ class HybridRetriever:
                         cl = self._split_csv_floats(ent.get("color_lab"))
                         bl = self._split_csv_floats(ent.get("bbox_xyxy"))
                         O_color_lab.append(cl if len(cl) == 3 else None)
-                        O_bbox.append(tuple(bl) if len(bl) == 4 else None)
+                        
+                        # Chuyển đổi bbox nếu là K keyframe
+                        if len(bl) == 4:
+                            bbox_tuple = (int(bl[0]), int(bl[1]), int(bl[2]), int(bl[3]))
+                            if is_k_keyframe:
+                                bbox_tuple = _scale_bbox_k_to_l(bbox_tuple)
+                            O_bbox.append(bbox_tuple)
+                        else:
+                            O_bbox.append(None)
 
                     n = len(O_vec_sim)
                     if n == 0:
@@ -705,37 +745,38 @@ class HybridRetriever:
 
                     for i in range(m):
                         q_lab, q_bb = Q[i]
-                        use_vec = True
+                        use_vec = True  # Always use vector similarity
                         use_color = (q_lab is not None)
                         use_bbox = (q_bb is not None)
 
-                        # Re-normalize weights
-                        w_sum = 0.0
+                        # Dynamic weight normalization based on available components
                         wv = W_VEC if use_vec else 0.0
                         wc = W_COLOR if use_color else 0.0
                         wb = W_BBOX if use_bbox else 0.0
                         w_sum = wv + wc + wb
 
+                        # Ensure we always have at least vector similarity
                         if w_sum == 0:
-                            continue
+                            wv = 1.0
+                            w_sum = 1.0
 
+                        # Normalize weights
                         wv /= w_sum
                         wc /= w_sum
                         wb /= w_sum
 
-                        # Vector similarity (vectorized)
+                        # Vector similarity (always computed)
                         vec_sim = np.array(O_vec_sim) * wv
                         S[i, :] += vec_sim
 
-                        # Color similarity (vectorized if possible)
+                        # Color similarity (only if query has color)
                         if use_color:
                             valid_colors = [(j, tuple(O_color_lab[j])) for j in range(n) if
                                             O_color_lab[j] is not None]
                             if valid_colors:
                                 indices, colors = zip(*valid_colors)
                                 # Use vectorized color distance computation
-                                distances = self._vectorized_color_distances([q_lab], list(colors))[
-                                    0]  # shape: (len(colors),)
+                                distances = self._vectorized_color_distances([q_lab], list(colors))[0]
 
                                 for idx_in_valid, j in enumerate(indices):
                                     de = distances[idx_in_valid]
@@ -743,7 +784,7 @@ class HybridRetriever:
                                         s_col = _sim_from_delta(de, SIGMA_COLOR)
                                         S[i, j] += wc * s_col
 
-                        # Bbox similarity
+                        # Bbox similarity (only if query has bbox)
                         if use_bbox:
                             for j in range(n):
                                 p_bb = O_bbox[j]
@@ -774,8 +815,18 @@ class HybridRetriever:
 
                     if boost > 0:
                         candidate_info[kf_id]["score"] += boost
+                        
+                        # Enhanced reason with component info
+                        components = []
+                        if any(q_lab is not None for q_lab, _ in Q):
+                            components.append("color")
+                        if any(q_bb is not None for _, q_bb in Q):
+                            components.append("bbox")
+                        components.append("vector")  # Always present
+                        
+                        component_str = "+".join(components)
                         candidate_info[kf_id].setdefault("reasons", []).append(
-                            f"Object match: '{obj_label}' +{boost:.3f} (S={S_obj:.3f}, cov={C:.2f})"
+                            f"Object match: '{obj_label}' +{boost:.3f} (S={S_obj:.3f}, cov={C:.2f}, {component_str})"
                         )
 
         # ===== COLOR FILTERS (OPTIMIZED) =====
@@ -832,24 +883,38 @@ class HybridRetriever:
                         )
 
     def _normalize_object_filters(self, object_filters: Dict) -> Dict:
-        """Normalize and validate object filters."""
-        norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
+        """Normalize and validate object filters. Now supports partial information."""
+        norm: Dict[str, List[Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[int, int, int, int]]]]] = {}
 
         for obj, items in object_filters.items():
-            fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
+            fixed: List[Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[int, int, int, int]]]] = []
 
             for it in items:
-                if (not isinstance(it, (list, tuple))) or len(it) != 2:
+                if not isinstance(it, (list, tuple)) or len(it) != 2:
                     continue
 
                 lab, bbox = it[0], it[1]
-                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
-                    continue
-                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
-                    continue
+                
+                # Process color (allow None)
+                lab_t = None
+                if lab is not None:
+                    if isinstance(lab, (list, tuple)) and len(lab) == 3:
+                        try:
+                            lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
+                        except (ValueError, TypeError):
+                            lab_t = None
+                
+                # Process bbox (allow None)
+                bbox_t = None
+                if bbox is not None:
+                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                        try:
+                            bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                        except (ValueError, TypeError):
+                            bbox_t = None
 
-                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
-                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                # Accept if we have at least one component (color or bbox)
+                # For "only name" case, both will be None but that's handled separately
                 fixed.append((lab_t, bbox_t))
 
             if fixed:
