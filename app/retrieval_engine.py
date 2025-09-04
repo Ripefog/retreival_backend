@@ -1083,18 +1083,29 @@ class HybridRetriever:
                 return 0.0  # Hard filter if all_match fails
         elif individual_constraints:
             # Individual constraint matching using Hungarian algorithm
+            logger.info(f"Evaluating individual constraints: {individual_constraints}")
             constraint_score = self._evaluate_individual_constraints(obj_hits, individual_constraints)
+            logger.info(f"Constraint score result: {constraint_score}")
         else:
             # No specific constraints beyond count
+            logger.info("No individual constraints, using score 1.0")
             constraint_score = 1.0
         
-        # 6. Final weighted score
+        # 6. Final weighted score  
+        logger.info(f"Final scoring breakdown for {obj_label}:")
+        logger.info(f"  Count accuracy: {count_accuracy:.3f} (weight: {SCORE_WEIGHTS['count_accuracy']:.1f})")
+        logger.info(f"  Semantic match: {avg_semantic_score:.3f} (weight: {SCORE_WEIGHTS['semantic_match']:.1f})")
+        logger.info(f"  Constraint match: {constraint_score:.3f} (weight: {SCORE_WEIGHTS['constraint_match']:.1f})")
+        logger.info(f"  Count bonus: {count_bonus:.3f} (weight: {SCORE_WEIGHTS['count_bonus']:.1f})")
+        
         final_score = (
             SCORE_WEIGHTS['count_accuracy'] * count_accuracy +
             SCORE_WEIGHTS['semantic_match'] * avg_semantic_score +
             SCORE_WEIGHTS['constraint_match'] * constraint_score +
             SCORE_WEIGHTS['count_bonus'] * count_bonus
         )
+        
+        logger.info(f"  Raw final score: {final_score:.3f}")
         
         # BOOST PERFECT EXACT MATCHES
         boost_multiplier = 0.25  # Base weight
@@ -1181,24 +1192,48 @@ class HybridRetriever:
             required_color = constraint['color']
             entity_color_str = entity.get('color_lab', '')
             
+            # DEBUG: Log color constraint evaluation
+            logger.info(f"Color constraint evaluation:")
+            logger.info(f"  Required color: {required_color}")
+            logger.info(f"  Entity keys: {list(entity.keys())}")
+            logger.info(f"  Entity color_lab: '{entity_color_str}'")
+            
             if entity_color_str:
                 try:
                     entity_color = self._split_csv_floats(entity_color_str)
+                    logger.info(f"  Parsed entity color: {entity_color}")
+                    
                     if len(entity_color) >= 3:
                         entity_lab = tuple(entity_color[:3])
-                        required_lab = self._ensure_lab(tuple(required_color)) if required_color else None
+                        # Convert RGB to LAB if needed
+                        if required_color and len(required_color) >= 3:
+                            r, g, b = required_color[:3]
+                            if 0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255 and (r > 1 or g > 1 or b > 1):
+                                required_lab = self._rgb_to_lab((int(r), int(g), int(b)))
+                            else:
+                                required_lab = (float(r), float(g), float(b))
+                        else:
+                            required_lab = None
+                        
+                        logger.info(f"  Entity LAB: {entity_lab}")
+                        logger.info(f"  Required LAB: {required_lab}")
                         
                         if required_lab and entity_lab:
                             distance = self._compare_color(required_lab, entity_lab)
                             color_score = np.exp(-(distance / 20.0) ** 2)  # Gaussian similarity
+                            logger.info(f"  Color distance: {distance:.2f}, score: {color_score:.3f}")
                             score *= color_score
                         else:
+                            logger.info(f"  Missing LAB data, applying 0.5 penalty")
                             score *= 0.5  # Partial penalty for missing color data
                     else:
+                        logger.info(f"  Invalid entity color length, applying 0.5 penalty")
                         score *= 0.5
-                except:
+                except Exception as e:
+                    logger.info(f"  Color parsing exception: {e}, applying 0.5 penalty")
                     score *= 0.5
             else:
+                logger.info(f"  No entity color data, applying 0.5 penalty")
                 score *= 0.5
         
         # Bbox constraint  

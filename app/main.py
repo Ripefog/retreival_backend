@@ -5,6 +5,12 @@ import shutil
 import tempfile
 import logging
 from contextlib import asynccontextmanager
+
+# Setup detailed logging for debugging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 from pydantic import ValidationError
 import uvicorn
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
@@ -146,6 +152,18 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
         logger.info(f"Raw request data: {request}")
         logger.info(f"Request dict: {request.model_dump()}")
         logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}'")
+        
+        # DEBUG: Log object filters specifically
+        if request.object_filters:
+            logger.info(f"🔍 Object filters received: {request.object_filters}")
+            for obj_name, filter_spec in request.object_filters.items():
+                logger.info(f"  {obj_name}: {filter_spec}")
+                if isinstance(filter_spec, dict):
+                    logger.info(f"    Keys: {list(filter_spec.keys())}")
+                    if 'constraints' in filter_spec:
+                        logger.info(f"    Constraint count: {len(filter_spec['constraints'])}")
+        else:
+            logger.info("🔍 No object filters in request")
         results = await retriever.search(
             text_query=request.text_query,
             mode=request.mode.value,
