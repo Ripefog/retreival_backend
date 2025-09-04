@@ -765,7 +765,7 @@ class HybridRetriever:
         if object_filters:
             norm_object_filters = self._normalize_object_filters(object_filters)
 
-            for obj_label, filter_spec in norm_object_filters.items():
+            for obj_label, queries in norm_object_filters.items():
                 obj_vector = self.get_clip_text_embedding(obj_label).tolist()
 
                 # OPTIMIZED: Collect all object IDs from all candidates for batch query
@@ -784,7 +784,7 @@ class HybridRetriever:
                 # OPTIMIZED: Single batch query instead of per-candidate queries
                 batch_results = await self._batch_search_milvus_objects(all_object_ids, obj_vector)
 
-                # Process each candidate based on filter type
+                # Process each candidate
                 for kf_id, obj_ids in candidate_objects.items():
                     # Get results for this candidate's objects
                     obj_hits = [batch_results[obj_id] for obj_id in obj_ids if obj_id in batch_results]
@@ -792,40 +792,113 @@ class HybridRetriever:
                     if not obj_hits:
                         continue
 
-                    # Route to appropriate processing logic
-                    if filter_spec.get('type') == 'count_aware':
-                        detected_count = len(obj_hits)
-                        required_count = filter_spec.get('count')
+                    # Prepare queries (same as before)
+                    Q = []
+                    for (q_color, q_bbox) in queries:
+                        q_lab = _ensure_lab(q_color) if q_color is not None else None
+                        q_bb = tuple(q_bbox) if q_bbox is not None else None
+                        Q.append((q_lab, q_bb))
 
-                        # Debug logging
-                        logger.info(
-                            f"Count-aware processing: {obj_label} detected={detected_count}, required={required_count}")
+                    m = len(Q)
+                    if m == 0:
+                        continue
 
-                        # EXACT COUNT ENFORCEMENT: Apply strong penalty for wrong count
-                        if not self._validate_count_constraint(detected_count, required_count):
-                            logger.info(
-                                f"Count mismatch: {obj_label} count {detected_count} doesn't match requirement {required_count}")
-                            # Apply severe penalty instead of skipping
-                            penalty = -0.5  # Large negative boost
-                            candidate_info[kf_id]["score"] += penalty
-                            candidate_info[kf_id].setdefault("reasons", []).append(
-                                f"Count penalty: '{obj_label}' {penalty:.3f} (Count: {detected_count}, req: {required_count})"
-                            )
-                            continue  # Skip positive boost processing
+                    # Parse hits
+                    O_vec_sim = []
+                    O_color_lab = []
+                    O_bbox = []
 
-                        boost = self._calculate_count_aware_score(obj_hits, filter_spec, obj_label)
-                        reason_detail = f"Count: {detected_count}"
-                        if required_count is not None:
-                            reason_detail += f" (req: {required_count})"
-                    else:
-                        # Legacy processing (existing logic)
-                        boost = self._calculate_legacy_object_score(obj_hits, filter_spec, obj_label)
-                        reason_detail = f"Legacy match"
+                    for h in obj_hits:
+                        ent = h.get("entity", {})
+                        d = float(h.get("distance", 0.0))
+                        s_vec = 1.0 / (1.0 + d)
+                        O_vec_sim.append(s_vec)
+
+                        cl = self._split_csv_floats(ent.get("color_lab"))
+                        bl = self._split_csv_floats(ent.get("bbox_xyxy"))
+                        O_color_lab.append(cl if len(cl) == 3 else None)
+                        O_bbox.append(tuple(bl) if len(bl) == 4 else None)
+
+                    n = len(O_vec_sim)
+                    if n == 0:
+                        continue
+
+                    # OPTIMIZED: Vectorized similarity matrix computation
+                    S = np.zeros((m, n))
+
+                    for i in range(m):
+                        q_lab, q_bb = Q[i]
+                        use_vec = True
+                        use_color = (q_lab is not None)
+                        use_bbox = (q_bb is not None)
+
+                        # Re-normalize weights
+                        w_sum = 0.0
+                        wv = W_VEC if use_vec else 0.0
+                        wc = W_COLOR if use_color else 0.0
+                        wb = W_BBOX if use_bbox else 0.0
+                        w_sum = wv + wc + wb
+
+                        if w_sum == 0:
+                            continue
+
+                        wv /= w_sum
+                        wc /= w_sum
+                        wb /= w_sum
+
+                        # Vector similarity (vectorized)
+                        vec_sim = np.array(O_vec_sim) * wv
+                        S[i, :] += vec_sim
+
+                        # Color similarity (vectorized if possible)
+                        if use_color:
+                            valid_colors = [(j, tuple(O_color_lab[j])) for j in range(n) if
+                                            O_color_lab[j] is not None]
+                            if valid_colors:
+                                indices, colors = zip(*valid_colors)
+                                # Use vectorized color distance computation
+                                distances = self._vectorized_color_distances([q_lab], list(colors))[
+                                    0]  # shape: (len(colors),)
+
+                                for idx_in_valid, j in enumerate(indices):
+                                    de = distances[idx_in_valid]
+                                    if de <= MAX_DELTA_E:
+                                        s_col = _sim_from_delta(de, SIGMA_COLOR)
+                                        S[i, j] += wc * s_col
+
+                        # Bbox similarity
+                        if use_bbox:
+                            for j in range(n):
+                                p_bb = O_bbox[j]
+                                if p_bb is not None:
+                                    iou = float(self._compare_bbox(q_bb, p_bb))
+                                    if iou >= MIN_IOU:
+                                        S[i, j] += wb * iou
+
+                    # OPTIMIZED: scipy Hungarian algorithm
+                    cost_matrix = 1.0 - S
+                    row_indices, col_indices = linear_sum_assignment(cost_matrix)
+
+                    # Aggregate score
+                    sim_sum = 0.0
+                    covered = 0
+
+                    for row_idx, col_idx in zip(row_indices, col_indices):
+                        if row_idx < m and col_idx < n:
+                            sij = S[row_idx, col_idx]
+                            sim_sum += sij
+                            if sij >= TAU_S:
+                                covered += 1
+
+                    S_match = (sim_sum / m) if m > 0 else 0.0
+                    C = (covered / m) if m > 0 else 0.0
+                    S_obj = ALPHA * S_match + BETA * C
+                    boost = W_OBJ * S_obj
 
                     if boost > 0:
                         candidate_info[kf_id]["score"] += boost
                         candidate_info[kf_id].setdefault("reasons", []).append(
-                            f"Object match: '{obj_label}' +{boost:.3f} ({reason_detail})"
+                            f"Object match: '{obj_label}' +{boost:.3f} (S={S_obj:.3f}, cov={C:.2f})"
                         )
 
         # ===== COLOR FILTERS (OPTIMIZED) =====
@@ -882,383 +955,30 @@ class HybridRetriever:
                         )
 
     def _normalize_object_filters(self, object_filters: Dict) -> Dict:
-        """Normalize and validate object filters with count-aware support."""
-        norm = {}
+        """Normalize and validate object filters."""
+        norm: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]] = {}
 
-        for obj, filter_spec in object_filters.items():
-            # New count-aware format
-            if isinstance(filter_spec, dict) and any(key in filter_spec for key in
-                                                     ['count', 'exact_count', 'min_count', 'max_count', 'constraints',
-                                                      'all_match']):
-                norm[obj] = self._normalize_count_aware_filter(filter_spec)
-            else:
-                # Legacy format - backward compatibility
-                norm[obj] = self._normalize_legacy_filter(filter_spec)
+        for obj, items in object_filters.items():
+            fixed: List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]] = []
+
+            for it in items:
+                if (not isinstance(it, (list, tuple))) or len(it) != 2:
+                    continue
+
+                lab, bbox = it[0], it[1]
+                if not (isinstance(lab, (list, tuple)) and len(lab) == 3):
+                    continue
+                if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+                    continue
+
+                lab_t = (float(lab[0]), float(lab[1]), float(lab[2]))
+                bbox_t = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                fixed.append((lab_t, bbox_t))
+
+            if fixed:
+                norm[obj] = fixed
 
         return norm
-
-    def _normalize_count_aware_filter(self, filter_spec: Dict) -> Dict:
-        """Normalize count-aware filter specification."""
-        # Handle different count format variations
-        count_constraint = None
-        if 'count' in filter_spec:
-            count_constraint = filter_spec['count']
-        elif 'exact_count' in filter_spec:
-            count_constraint = filter_spec['exact_count']
-        elif 'min_count' in filter_spec and 'max_count' in filter_spec:
-            count_constraint = [filter_spec['min_count'], filter_spec['max_count']]
-        elif 'min_count' in filter_spec:
-            count_constraint = f">={filter_spec['min_count']}"
-        elif 'max_count' in filter_spec:
-            count_constraint = f"<={filter_spec['max_count']}"
-
-        normalized = {
-            'type': 'count_aware',
-            'count': count_constraint,
-            'constraints': [],
-            'all_match': None
-        }
-
-        # Parse individual constraints
-        if 'constraints' in filter_spec:
-            for constraint in filter_spec['constraints']:
-                if isinstance(constraint, dict):
-                    normalized['constraints'].append(constraint)
-                elif isinstance(constraint, list):
-                    # Handle legacy format within constraints
-                    if len(constraint) == 0:
-                        normalized['constraints'].append({})  # Any object
-                    elif len(constraint) == 3:
-                        normalized['constraints'].append({'color': constraint})
-                    elif len(constraint) == 4:
-                        normalized['constraints'].append({'bbox': constraint})
-                    elif len(constraint) == 2:
-                        color, bbox = constraint
-                        if len(color) == 3 and len(bbox) == 4:
-                            normalized['constraints'].append({'color': color, 'bbox': bbox})
-
-        # Parse all_match constraint
-        if 'all_match' in filter_spec:
-            normalized['all_match'] = filter_spec['all_match']
-
-        return normalized
-
-    def _normalize_legacy_filter(self, items) -> Dict:
-        """Normalize legacy filter format for backward compatibility."""
-        constraints = []
-
-        if not isinstance(items, list):
-            return {'type': 'legacy', 'constraints': []}
-
-        for item in items:
-            if isinstance(item, list):
-                if len(item) == 0:
-                    constraints.append({})  # Any object
-                elif len(item) == 2:
-                    color, bbox = item
-                    if (isinstance(color, (list, tuple)) and len(color) == 3 and
-                            isinstance(bbox, (list, tuple)) and len(bbox) == 4):
-                        constraints.append({
-                            'color': tuple(float(x) for x in color),
-                            'bbox': tuple(int(x) for x in bbox)
-                        })
-                elif len(item) == 3:
-                    # Color only
-                    constraints.append({'color': tuple(float(x) for x in item)})
-                elif len(item) == 4:
-                    # BBox only
-                    constraints.append({'bbox': tuple(int(x) for x in item)})
-            elif isinstance(item, dict):
-                constraints.append(item)
-
-        return {'type': 'legacy', 'constraints': constraints}
-
-    def _validate_count_constraint(self, detected_count: int, constraint) -> bool:
-        """Validate if detected count satisfies constraint."""
-        if constraint is None:
-            return True  # No constraint
-
-        if isinstance(constraint, int):
-            return detected_count == constraint  # Exact count
-        elif isinstance(constraint, list) and len(constraint) == 2:
-            return constraint[0] <= detected_count <= constraint[1]  # Range
-        elif isinstance(constraint, str):
-            # Parse expressions like ">=2", "<=5", "!=1"
-            try:
-                if constraint.startswith(">="):
-                    return detected_count >= int(constraint[2:])
-                elif constraint.startswith("<="):
-                    return detected_count <= int(constraint[2:])
-                elif constraint.startswith("!="):
-                    return detected_count != int(constraint[2:])
-                elif constraint.startswith(">"):
-                    return detected_count > int(constraint[1:])
-                elif constraint.startswith("<"):
-                    return detected_count < int(constraint[1:])
-                elif constraint.startswith("=="):
-                    return detected_count == int(constraint[2:])
-            except ValueError:
-                logger.warning(f"Invalid count constraint expression: {constraint}")
-
-        return True  # Default: no constraint or unparseable
-
-    def _calculate_count_accuracy_score(self, detected: int, required) -> float:
-        """Calculate accuracy score for count matching."""
-        if required is None:
-            return 1.0  # No constraint = perfect score
-
-        if isinstance(required, int):
-            # Exact count: exponential decay from perfect match
-            if detected == required:
-                return 1.0
-            else:
-                error_ratio = abs(detected - required) / max(required, 1)
-                return max(0.0, np.exp(-2 * error_ratio))  # Steep penalty for wrong count
-
-        elif isinstance(required, list) and len(required) == 2:  # Range [min, max]
-            min_count, max_count = required
-            if min_count <= detected <= max_count:
-                # Perfect if in range, bonus for being in middle
-                if max_count == min_count:
-                    return 1.0
-                range_center = (min_count + max_count) / 2
-                distance_from_center = abs(detected - range_center) / (max_count - min_count)
-                return 1.0 - 0.2 * distance_from_center  # Small penalty for being off-center
-            else:
-                # Penalty for being outside range
-                if detected < min_count:
-                    return max(0.0, 0.5 * detected / min_count)
-                else:  # detected > max_count
-                    return max(0.0, 0.5 * max_count / detected)
-
-        elif isinstance(required, str):
-            # For expression constraints, if it passes validation, give full score
-            if self._validate_count_constraint(detected, required):
-                return 1.0
-            else:
-                return 0.0
-
-        return 1.0  # Default: no constraint
-
-    def _calculate_count_aware_score(
-            self,
-            obj_hits: List[Dict],
-            filter_spec: Dict,
-            obj_label: str
-    ) -> float:
-        """Calculate score for count-aware object filter."""
-        detected_count = len(obj_hits)
-        count_constraint = filter_spec.get('count')
-
-        # Scoring weights
-        SCORE_WEIGHTS = {
-            'count_accuracy': 0.4,  # How well detected count matches required count
-            'semantic_match': 0.3,  # CLIP semantic similarity
-            'constraint_match': 0.2,  # Color/bbox constraint satisfaction
-            'count_bonus': 0.1  # Bonus for exact count match
-        }
-
-        # 1. Count validation - hard filter
-        if not self._validate_count_constraint(detected_count, count_constraint):
-            return 0.0  # Hard filter: doesn't meet count requirement
-
-        # 2. Count accuracy score
-        count_accuracy = self._calculate_count_accuracy_score(detected_count, count_constraint)
-
-        # 3. Count bonus (exact match gets bonus)
-        count_bonus = 0.0
-        if isinstance(count_constraint, int) and detected_count == count_constraint:
-            count_bonus = 1.0
-
-        # 4. Semantic similarity score
-        semantic_scores = []
-        for hit in obj_hits:
-            distance = hit.get('distance', 0.0)
-            semantic_score = 1.0 / (1.0 + distance)
-            semantic_scores.append(semantic_score)
-        avg_semantic_score = np.mean(semantic_scores) if semantic_scores else 0.0
-
-        # 5. Constraint matching score
-        constraint_score = 0.0
-        individual_constraints = filter_spec.get('constraints', [])
-        all_match_constraint = filter_spec.get('all_match')
-
-        if all_match_constraint:
-            # All objects must satisfy the all_match constraint
-            constraint_score = self._evaluate_all_match_constraint(obj_hits, all_match_constraint)
-            if constraint_score < 0.7:  # Threshold for all_match
-                return 0.0  # Hard filter if all_match fails
-        elif individual_constraints:
-            # Individual constraint matching using Hungarian algorithm
-            constraint_score = self._evaluate_individual_constraints(obj_hits, individual_constraints)
-        else:
-            # No specific constraints beyond count
-            constraint_score = 1.0
-
-        # 6. Final weighted score
-        final_score = (
-                SCORE_WEIGHTS['count_accuracy'] * count_accuracy +
-                SCORE_WEIGHTS['semantic_match'] * avg_semantic_score +
-                SCORE_WEIGHTS['constraint_match'] * constraint_score +
-                SCORE_WEIGHTS['count_bonus'] * count_bonus
-        )
-
-        # BOOST PERFECT EXACT MATCHES
-        boost_multiplier = 0.25  # Base weight
-        if isinstance(count_constraint, int) and detected_count == count_constraint:
-            boost_multiplier *= 2.0  # Double boost for exact count matches
-            logger.info(f"Perfect count match bonus: {obj_label} exact count {detected_count}")
-
-        return final_score * boost_multiplier
-
-    def _evaluate_all_match_constraint(self, obj_hits: List[Dict], constraint: Dict) -> float:
-        """Evaluate if all objects satisfy the constraint."""
-        if not obj_hits:
-            return 1.0
-
-        total_score = 0.0
-        for hit in obj_hits:
-            entity = hit.get('entity', {})
-            score = self._evaluate_single_constraint(entity, constraint)
-            total_score += score
-
-        return total_score / len(obj_hits)
-
-    def _evaluate_individual_constraints(self, obj_hits: List[Dict], constraints: List[Dict]) -> float:
-        """Evaluate individual constraints using simplified matching."""
-        if not constraints or not obj_hits:
-            return 1.0
-
-        m = len(constraints)  # Number of constraint queries
-        n = len(obj_hits)  # Number of detected objects
-
-        if m == 0:
-            return 1.0
-
-        # Build similarity matrix
-        S = np.zeros((m, n))
-
-        for i, constraint in enumerate(constraints):
-            for j, hit in enumerate(obj_hits):
-                entity = hit.get('entity', {})
-
-                # Semantic score
-                distance = hit.get('distance', 0.0)
-                semantic_score = 1.0 / (1.0 + distance)
-
-                # Constraint score
-                constraint_score = self._evaluate_single_constraint(entity, constraint)
-
-                # Combined score (50-50 weight)
-                S[i, j] = 0.5 * semantic_score + 0.5 * constraint_score
-
-        # Use Hungarian algorithm for optimal assignment
-        from scipy.optimize import linear_sum_assignment
-        cost_matrix = 1.0 - S
-        row_indices, col_indices = linear_sum_assignment(cost_matrix)
-
-        # Calculate final score
-        total_similarity = 0.0
-        matched_constraints = 0
-
-        for row_idx, col_idx in zip(row_indices, col_indices):
-            if row_idx < m and col_idx < n:
-                similarity = S[row_idx, col_idx]
-                total_similarity += similarity
-                if similarity >= 0.5:  # Threshold for "good match"
-                    matched_constraints += 1
-
-        avg_similarity = (total_similarity / m) if m > 0 else 0.0
-        coverage = (matched_constraints / m) if m > 0 else 0.0
-
-        # Combine similarity and coverage
-        return 0.7 * avg_similarity + 0.3 * coverage
-
-    def _evaluate_single_constraint(self, entity: Dict, constraint: Dict) -> float:
-        """Evaluate single object against constraint."""
-        if not constraint:  # Empty constraint = any object matches
-            return 1.0
-
-        score = 1.0
-        constraint_count = 0
-
-        # Color constraint
-        if 'color' in constraint:
-            constraint_count += 1
-            required_color = constraint['color']
-            entity_color_str = entity.get('color_lab', '')
-
-            if entity_color_str:
-                try:
-                    entity_color = self._split_csv_floats(entity_color_str)
-                    if len(entity_color) >= 3:
-                        entity_lab = tuple(entity_color[:3])
-                        required_lab = self._ensure_lab(tuple(required_color)) if required_color else None
-
-                        if required_lab and entity_lab:
-                            distance = self._compare_color(required_lab, entity_lab)
-                            color_score = np.exp(-(distance / 20.0) ** 2)  # Gaussian similarity
-                            score *= color_score
-                        else:
-                            score *= 0.5  # Partial penalty for missing color data
-                    else:
-                        score *= 0.5
-                except:
-                    score *= 0.5
-            else:
-                score *= 0.5
-
-        # Bbox constraint
-        if 'bbox' in constraint:
-            constraint_count += 1
-            required_bbox = constraint['bbox']
-            entity_bbox_str = entity.get('bbox_xyxy', '')
-
-            if entity_bbox_str and required_bbox:
-                try:
-                    entity_bbox_list = self._split_csv_floats(entity_bbox_str)
-                    if len(entity_bbox_list) >= 4:
-                        entity_bbox = tuple(int(x) for x in entity_bbox_list[:4])
-                        required_bbox_tuple = tuple(required_bbox)
-
-                        iou = self._compare_bbox(required_bbox_tuple, entity_bbox)
-                        if iou >= 0.3:  # Minimum IoU threshold
-                            score *= iou
-                        else:
-                            score *= 0.1  # Low score for poor spatial match
-                    else:
-                        score *= 0.5
-                except:
-                    score *= 0.5
-            else:
-                score *= 0.5
-
-        # If no constraints specified, perfect match
-        if constraint_count == 0:
-            return 1.0
-
-        return score
-
-    def _calculate_legacy_object_score(
-            self,
-            obj_hits: List[Dict],
-            filter_spec: Dict,
-            obj_label: str
-    ) -> float:
-        """Calculate score for legacy object filter format."""
-        constraints = filter_spec.get('constraints', [])
-
-        if not constraints:
-            # No constraints, just semantic matching
-            semantic_scores = []
-            for hit in obj_hits:
-                distance = hit.get('distance', 0.0)
-                semantic_score = 1.0 / (1.0 + distance)
-                semantic_scores.append(semantic_score)
-            return np.mean(semantic_scores) * 0.20 if semantic_scores else 0.0
-
-        # Use individual constraint evaluation for legacy format
-        return self._evaluate_individual_constraints(obj_hits, constraints) * 0.20
 
     def _normalize_text(self, s: str) -> str:
         """Normalize text for fuzzy matching."""
