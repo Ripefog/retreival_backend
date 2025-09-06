@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)",
+      "Read(/D:\\HCM_AI_CHALLENGE\\retreival_backend\\app/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
