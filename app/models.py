@@ -10,6 +10,25 @@ ObjectItem = Union[
     Tuple[float, float, float],  # LAB
     Tuple[int, int, int, int]  # BBOX
 ]
+# # --- Count Constraint Types ---
+# CountConstraint = Union[
+#     int,  # Exact count: 3
+#     List[int],  # Range: [2, 4]
+#     str  # Expression: ">=2", "<=5", "!=1"
+# ]
+#
+# ObjectConstraintSpec = Union[
+#     # Legacy formats (backward compatible)
+#     List[Any],  # [[255,0,0], [100,100,200,200]]
+#     Dict[str, Any],  # {"color": [255,0,0], "bbox": [...]}
+#
+#         # New count-aware format
+#     Dict[str, Union[
+#         CountConstraint,  # "count": 3
+#         List[Dict[str, Any]],  # "constraints": [...]
+#         Dict[str, Any]  # "all_match": {...}
+#     ]]
+# ]
 
 
 # --- Enums for controlled vocabularies ---
@@ -158,6 +177,41 @@ search_examples = {
             "top_k": 10
         },
     },
+    # "exact_count_matching": {
+    #     "summary": "7. Exact count matching (NEW FORMAT)",
+    #     "description": "Tìm keyframes có đúng số lượng objects specified. Supports 'exact_count', 'count', 'min_count', 'max_count'.",
+    #     "value": {
+    #         "text_query": "group photo of three people",
+    #         "mode": "hybrid",
+    #         "object_filters": {
+    #             "person": {
+    #                 "exact_count": 3,
+    #                 "constraints": [
+    #                     {"color": [255, 0, 0]},
+    #                     {"bbox": [100, 100, 300, 400]},
+    #                     {}
+    #                 ]
+    #             }
+    #         },
+    #         "top_k": 10
+    #     },
+    # # },
+    # "count_range_matching": {
+    #     "summary": "8. Count range matching (NEW FORMAT)",
+    #     "description": "Tìm keyframes có số lượng objects trong khoảng specified.",
+    #     "value": {
+    #         "text_query": "business meeting with multiple people",
+    #         "mode": "hybrid",
+    #         "object_filters": {
+    #             "person": {
+    #                 "min_count": 3,
+    #                 "max_count": 6,
+    #                 "all_match": {"bbox": [0, 0, 800, 400]}
+    #             }
+    #         },
+    #         "top_k": 15
+    #     },
+    # },
     "backward_compatibility": {
         "summary": "7. Backward compatibility (OLD FORMAT)",
         "description": "Format cũ vẫn hoạt động: ((LAB), (BBOX)).",

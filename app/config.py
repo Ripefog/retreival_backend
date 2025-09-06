@@ -50,10 +50,10 @@ class Settings(BaseSettings):
     CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "models/clip_model.bin")
     BEIT3_MODEL_PATH: str = os.environ.get("BEIT3_MODEL_PATH", "models/beit3_base_patch16_384_coco_retrieval.pth")
     BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "models/beit3.spm")
-    CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH",
-                                              "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
-    CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH",
-                                                  "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
+    # CO_DETR_CONFIG_PATH: str = os.environ.get("CO_DETR_CONFIG_PATH",
+    #                                           "Co_DETR/projects/configs/co_dino/co_dino_5scale_swin_large_16e_o365tococo.py")
+    # CO_DETR_CHECKPOINT_PATH: str = os.environ.get("CO_DETR_CHECKPOINT_PATH",
+    #                                               "models/co_dino_5scale_swin_large_16e_o365tococo.pth")
 
     # --- Model & Processing Configuration ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -140,8 +140,8 @@ class Settings(BaseSettings):
             self.CLIP_MODEL_PATH,
             self.BEIT3_MODEL_PATH,
             self.BEIT3_SPM_PATH,
-            self.CO_DETR_CONFIG_PATH,
-            self.CO_DETR_CHECKPOINT_PATH
+            # self.CO_DETR_CONFIG_PATH,
+            # self.CO_DETR_CHECKPOINT_PATH
         ]
         all_exist = True
         for path in paths_to_check:
