@@ -239,7 +239,7 @@ class HybridRetriever:
         """Convert RGB tuple to CIELAB tuple."""
         rgb_obj = sRGBColor(*rgb, is_upscaled=True)
         lab_obj = convert_color(rgb_obj, LabColor)
-        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
+        return lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b
 
     def _load_models(self):
         """Tải tất cả các mô hình AI cần thiết vào đúng device."""
@@ -272,6 +272,7 @@ class HybridRetriever:
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
+        return None
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
         with torch.no_grad():
@@ -285,6 +286,7 @@ class HybridRetriever:
                 only_infer=True
             )
             return text_emb.cpu().numpy()[0]
+        return None
 
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]],
                                     colors2: List[Tuple[float, float, float]]) -> np.ndarray:
