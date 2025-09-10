@@ -158,6 +158,7 @@ class HybridRetriever:
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
+        return None
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
         with torch.no_grad():
@@ -171,6 +172,7 @@ class HybridRetriever:
                 only_infer=True
             )
             return text_emb.cpu().numpy()[0]
+        return None
 
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]],
                                     colors2: List[Tuple[float, float, float]]) -> np.ndarray:
@@ -426,7 +428,8 @@ class HybridRetriever:
                     expr = f'({expr}) && ({user_expr})'
                 else:
                     expr = user_expr
-        return expr
+            return expr
+        return None
 
     async def _search_milvus(self, collection_name: str, vector: List[float], top_k: int,
                              expr: Optional[str] = None, user_query: str = "") -> List[Dict]:
@@ -459,7 +462,7 @@ class HybridRetriever:
         hits = []
         for hit in search_results:
             hit_data = hit.entity.to_dict()["entity"]
-            user_db = hit_data.get("user") or ""
+            # user_db = hit_data.get("user") or ""
             # if user_query and user_query not in user_db.split(","):
             #     continue
 
