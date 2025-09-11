@@ -7,9 +7,4 @@ logs/
 models/
 results/
 venv/
-.env
-.env.local
-.env.development.local
-.env.test.local
 docker-compose.yml
-D

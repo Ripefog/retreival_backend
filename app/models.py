@@ -68,11 +68,13 @@ class SearchRequest(BaseModel):
     asr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các video có chứa lời thoại này (ASR).")
     top_k: int = Field(default=20, ge=1, le=2000, description="Số lượng kết quả hàng đầu để trả về.")
     
-    # Multi-query search parameters
-    use_multi_query: bool = Field(default=True, description="Có sử dụng multi-query search với Gemini để sinh ra nhiều câu query tương tự hay không.")
-    n_queries: int = Field(default=5, ge=1, le=10, description="Số lượng câu query sẽ được sinh ra bởi Gemini (bao gồm câu query gốc).")
-    
-    # exact_match: bool = Field(default=False, description="Chế độ exact matching: ưu tiên kết quả có object/color filters khớp chính xác.")
+    # NEW: Multi-query parameter
+    num_query: int = Field(
+        default=1, 
+        ge=1, 
+        le=10, 
+        description="Tổng số câu query sử dụng cho tìm kiếm. 1 = chỉ dùng query gốc, 2 = query gốc + 1 câu Gemini sinh, 3 = query gốc + 2 câu Gemini sinh, v.v."
+    )
 
 
 # --- API Response Models ---
@@ -115,11 +117,28 @@ search_examples = {
             "text_query": "a person sitting at a desk",
             "mode": "hybrid",
             "user_query": "Minh Tâm",
+            "num_query": 1,
             "top_k": 5
         },
     },
+    "multi_query_example": {
+        "summary": "2. Multi-query search với Gemini",
+        "description": "Tìm kiếm với 3 câu query (1 gốc + 2 câu Gemini sinh thêm).",
+        "value": {
+            "text_query": "four astronauts dressed in black",
+            "object_filters": {
+                "person": {
+                    "count": 4,
+                    "constraints": []
+                }
+            },
+            "mode": "hybrid",
+            "num_query": 3,
+            "top_k": 500
+        },
+    },
     "object_only_search": {
-        "summary": "2. Object-only search (NEW FORMAT)",
+        "summary": "3. Object-only search (NEW FORMAT)",
         "description": "Tìm keyframes có object 'person' và 'chair' không quan tâm màu sắc hay vị trí.",
         "value": {
             "text_query": "A man is speaking in front of a microphone on HTV7",
@@ -129,11 +148,12 @@ search_examples = {
                 "person": [],
                 "chair": []
             },
+            "num_query": 2,
             "top_k": 20
         },
     },
     "color_constraint": {
-        "summary": "3. Color-only constraint (NEW FORMAT)",
+        "summary": "4. Color-only constraint (NEW FORMAT)",
         "description": "Tìm object 'person' có màu đỏ và 'car' có màu xanh (RGB format).",
         "value": {
             "text_query": "person in red shirt near blue car",
@@ -146,7 +166,7 @@ search_examples = {
         },
     },
     "bbox_constraint": {
-        "summary": "4. Spatial constraint (NEW FORMAT)",
+        "summary": "5. Spatial constraint (NEW FORMAT)",
         "description": "Tìm object 'person' trong vùng trung tâm màn hình.",
         "value": {
             "text_query": "person in the center of the frame",
@@ -158,7 +178,7 @@ search_examples = {
         },
     },
     "mixed_constraints": {
-        "summary": "5. Mixed constraints (NEW FORMAT)",
+        "summary": "6. Mixed constraints (NEW FORMAT)",
         "description": "Kết hợp nhiều loại constraint cho cùng object.",
         "value": {
             "text_query": "presenter on stage",
@@ -175,7 +195,7 @@ search_examples = {
         },
     },
     "dict_format": {
-        "summary": "6. Dictionary format (NEW FORMAT)",
+        "summary": "7. Dictionary format (NEW FORMAT)",
         "description": "Sử dụng dictionary format rõ ràng hơn.",
         "value": {
             "text_query": "news anchor in studio",
@@ -192,7 +212,7 @@ search_examples = {
         },
     },
     "exact_count_matching": {
-        "summary": "7. Exact count matching (NEW FORMAT)",
+        "summary": "8. Exact count matching (NEW FORMAT)",
         "description": "Tìm keyframes có đúng số lượng objects specified. Supports 'exact_count', 'count', 'min_count', 'max_count'.",
         "value": {
             "text_query": "group photo of three people",
@@ -211,7 +231,7 @@ search_examples = {
         },
     },
     "count_range_matching": {
-        "summary": "8. Count range matching (NEW FORMAT)", 
+        "summary": "9. Count range matching (NEW FORMAT)", 
         "description": "Tìm keyframes có số lượng objects trong khoảng specified.",
         "value": {
             "text_query": "business meeting with multiple people",
@@ -227,7 +247,7 @@ search_examples = {
         },
     },
     "backward_compatibility": {
-        "summary": "9. Backward compatibility (OLD FORMAT)",
+        "summary": "10. Backward compatibility (OLD FORMAT)",
         "description": "Format cũ vẫn hoạt động: ((LAB), (BBOX)).",
         "value": {
             "text_query": "a presenter on stage",

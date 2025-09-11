@@ -8,7 +8,6 @@ import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
 import torch
-import statistics
 
 # Performance optimization imports
 from scipy.optimize import linear_sum_assignment
@@ -22,7 +21,6 @@ except ImportError:
     logging.warning("colorspacious not available, falling back to faster Euclidean distance")
 
 # Thêm đường dẫn tới các repo phụ thuộc mà không có trong PyPI
-sys.path.append('/app/Co_DETR')
 sys.path.append('/app/unilm/beit3')
 
 # Import từ các thư viện ML
@@ -41,8 +39,9 @@ from .config import settings
 from .database import db_manager
 import numpy as np
 from rapidfuzz import fuzz
+import statistics
 
-# Gemini API import
+# Thêm import cho Gemini
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
     HAS_GEMINI = True
@@ -119,6 +118,8 @@ class HybridRetriever:
         
         # Initialize Gemini LLM if available
         self.llm = None
+        ic(settings.GOOGLE_API_KEY)
+        ic(HAS_GEMINI)
         if HAS_GEMINI and settings.GOOGLE_API_KEY:
             try:
                 self.llm = ChatGoogleGenerativeAI(
@@ -127,12 +128,12 @@ class HybridRetriever:
                     max_retries=2,
                     google_api_key=settings.GOOGLE_API_KEY
                 )
-                logger.info("✅ Gemini LLM initialized successfully")
+                logger.info("✅ Gemini LLM initialized for multi-query search")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini LLM: {e}")
                 self.llm = None
         else:
-            logger.warning("Gemini not available - missing dependency or API key")
+            logger.warning("Gemini LLM not available (missing API key or library)")
 
     async def initialize(self):
         """Khởi tạo retriever: kết nối DB và tải model một cách an toàn."""
@@ -183,7 +184,6 @@ class HybridRetriever:
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
-        return None
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
         with torch.no_grad():
@@ -197,7 +197,6 @@ class HybridRetriever:
                 only_infer=True
             )
             return text_emb.cpu().numpy()[0]
-        return None
 
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]],
                                     colors2: List[Tuple[float, float, float]]) -> np.ndarray:
@@ -306,220 +305,26 @@ class HybridRetriever:
             i += 3
         return lab6
 
-    def _generate_enhanced_queries(self, original_query: str, n_queries: int = 5) -> List[str]:
-        """
-        Sử dụng Gemini để sinh ra n câu query tương tự từ câu gốc.
-        Bao gồm cả việc dịch từ tiếng Việt sang tiếng Anh và tối ưu cho CLIP.
-        """
-        if not self.llm:
-            logger.warning("Gemini not available, using original query only")
-            return [original_query]
-            
-        try:
-            prompt = f"""
-Bạn là một chuyên gia về tìm kiếm hình ảnh và video. Nhiệm vụ của bạn là tạo ra {n_queries} câu query tìm kiếm tương tự từ câu gốc để tối ưu cho mô hình CLIP.
-
-Câu query gốc: "{original_query}"
-
-Yêu cầu:
-1. Nếu câu gốc là tiếng Việt, hãy dịch sang tiếng Anh
-2. Tạo thêm {n_queries-1} câu query khác có liên quan, liên tưởng
-3. Các câu query phải:
-   - Mô tả cụ thể, rõ ràng về đối tượng, hành động, màu sắc, bối cảnh
-   - Phù hợp với khả năng hiểu của mô hình CLIP
-   - Có độ đa dạng về góc nhìn nhưng vẫn liên quan đến ý nghĩa gốc
-   - Ngắn gọn, súc tích (10-15 từ)
-
-Ví dụ:
-- Query gốc: "người đàn ông mặc áo đỏ"
-- Kết quả: 
-  1. "man wearing red shirt"
-  2. "person in red clothing"
-  3. "male with red garment"
-  4. "guy dressed in red"
-  5. "man in crimson outfit"
-
-Chỉ trả về {n_queries} câu query, mỗi câu một dòng, không cần số thứ tự hay giải thích:
-"""
-
-            response = self.llm.invoke(prompt)
-            generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
-            
-            # Đảm bảo có đúng n_queries câu
-            if len(generated_queries) < n_queries:
-                # Nếu không đủ, thêm câu gốc và một số biến thể đơn giản
-                generated_queries.append(original_query)
-                while len(generated_queries) < n_queries:
-                    generated_queries.append(f"image of {original_query}")
-            elif len(generated_queries) > n_queries:
-                generated_queries = generated_queries[:n_queries]
-            
-            logger.info(f"Generated {len(generated_queries)} enhanced queries from: '{original_query}'")
-            for i, query in enumerate(generated_queries):
-                logger.info(f"  Query {i+1}: {query}")
-            return generated_queries
-            
-        except Exception as e:
-            logger.error(f"Failed to generate enhanced queries with Gemini: {e}")
-            # Fallback: trả về câu gốc
-            return [original_query]
-
-    async def _search_with_multiple_queries(self, queries: List[str], mode: str, user_query: str, 
-                                          object_filters: Optional[Dict], color_filters: Optional[List],
-                                          ocr_query: Optional[str], asr_query: Optional[str],
-                                          top_k: int) -> Dict[str, Dict[str, Any]]:
-        """
-        Thực hiện tìm kiếm với nhiều query và tổng hợp kết quả.
-        """
-        all_candidates = {}
-        
-        # Tìm kiếm với từng query
-        for i, query in enumerate(queries):
-            try:
-                logger.info(f"Searching with query {i+1}/{len(queries)}: '{query}'")
-                
-                # Tìm kiếm với query hiện tại
-                results = await self._single_query_search(
-                    query, mode, user_query, object_filters, color_filters, 
-                    ocr_query, asr_query, top_k * 2  # Lấy nhiều hơn để có đủ kết quả đa dạng
-                )
-                
-                # Tích lũy kết quả vào all_candidates
-                for result in results:
-                    kf_id = result['keyframe_id']
-                    if kf_id not in all_candidates:
-                        all_candidates[kf_id] = {
-                            'keyframe_id': kf_id,
-                            'video_id': result['video_id'],
-                            'timestamp': result['timestamp'],
-                            'scores': [],
-                            'all_reasons': [],
-                            'metadata': result['metadata']
-                        }
-                    
-                    all_candidates[kf_id]['scores'].append(result['score'])
-                    all_candidates[kf_id]['all_reasons'].extend([f"Q{i+1}: {reason}" for reason in result['reasons']])
-                    
-            except Exception as e:
-                logger.error(f"Error searching with query '{query}': {e}")
-                continue
-        
-        return all_candidates
-
-    async def _single_query_search(self, text_query: str, mode: str, user_query: str, 
-                                 object_filters: Optional[Dict], color_filters: Optional[List],
-                                 ocr_query: Optional[str], asr_query: Optional[str],
-                                 top_k: int) -> List[Dict[str, Any]]:
-        """
-        Thực hiện tìm kiếm với một query duy nhất (logic gốc).
-        """
-        candidate_info: Dict[str, Dict[str, Any]] = {}
-        
-        # BƯỚC 1: LẤY ỨNG VIÊN BAN ĐẦU
-        tasks = []
-        if mode in ['hybrid', 'clip']:
-            clip_vector = self.get_clip_text_embedding(text_query).tolist()
-            tasks.append(self._search_milvus_async(settings.CLIP_COLLECTION, clip_vector,
-                                                   top_k, None, user_query, 'clip'))
-        if mode == 'beit3':
-            beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
-            tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector,
-                                                   top_k, None, user_query, 'beit3'))
-
-        search_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, result in enumerate(search_results):
-            if isinstance(result, Exception):
-                logger.error(f"Search task {i} failed: {result}")
-                continue
-            search_type = 'clip' if (mode in ['hybrid', 'clip'] and i == 0) else 'beit3'
-            self._process_search_results(result, candidate_info, search_type)
-
-        # BƯỚC 2, 3, 4: TINH CHỈNH, LỌC VÀ TĂNG ĐIỂM
-        refinement_tasks = []
-        if mode == 'hybrid' and candidate_info:
-            refinement_tasks.append(self._async_hybrid_reranking(candidate_info, text_query))
-        if object_filters or color_filters:
-            refinement_tasks.append(self._apply_object_color_filters_optimized(
-                candidate_info, object_filters, color_filters, top_k))
-        if ocr_query:
-            refinement_tasks.append(self._async_apply_ocr_filter(candidate_info, ocr_query))
-        if asr_query:
-            refinement_tasks.append(self._async_apply_asr_filter(candidate_info, asr_query))
-
-        if refinement_tasks:
-            await asyncio.gather(*refinement_tasks, return_exceptions=True)
-
-        # Trả về kết quả đã format
-        sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
-        return self._format_results(sorted_results[:top_k])
-
-    def _aggregate_multi_query_results(self, all_candidates: Dict[str, Dict], top_k: int) -> List[Dict[str, Any]]:
-        """
-        Tổng hợp kết quả từ nhiều query và tính điểm trung bình.
-        """
-        final_candidates = {}
-        
-        for kf_id, data in all_candidates.items():
-            scores = data['scores']
-            if not scores:
-                continue
-                
-            # Tính điểm trung bình và các thống kê
-            avg_score = statistics.mean(scores)
-            max_score = max(scores)
-            min_score = min(scores)
-            score_std = statistics.stdev(scores) if len(scores) > 1 else 0
-            
-            # Điểm cuối cùng: trung bình có trọng số với độ ổn định
-            stability_bonus = 1.0 - (score_std / max(avg_score, 0.1))  # Thưởng cho kết quả ổn định
-            final_score = avg_score * (1.0 + 0.1 * stability_bonus)
-            
-            final_candidates[kf_id] = {
-                'keyframe_id': kf_id,
-                'video_id': data['video_id'],
-                'timestamp': data['timestamp'],
-                'score': final_score,
-                'reasons': [
-                    f"Multi-query average: {avg_score:.3f} (from {len(scores)} queries)",
-                    f"Score range: {min_score:.3f} - {max_score:.3f}",
-                    f"Stability bonus: {stability_bonus:.3f}"
-                ] + data['all_reasons'][:5],  # Giới hạn số lý do hiển thị
-                'metadata': {
-                    **data['metadata'],
-                    'query_count': len(scores),
-                    'avg_score': round(avg_score, 4),
-                    'max_score': round(max_score, 4),
-                    'min_score': round(min_score, 4),
-                    'score_std': round(score_std, 4)
-                }
-            }
-        
-        # Sắp xếp và trả về top_k
-        sorted_results = sorted(final_candidates.values(), key=lambda x: x['score'], reverse=True)
-        return sorted_results[:top_k]
-
     # --- LOGIC TÌM KIẾM CHÍNH ---
     async def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[Dict],
                      color_filters: Optional[List], ocr_query: Optional[str], asr_query: Optional[str],
-                     top_k: int, use_multi_query: bool = True, n_queries: int = 5) -> List[Dict[str, Any]]:
+                     top_k: int, num_query: int = 1) -> List[Dict[str, Any]]:
         """
         Hàm tìm kiếm chính với tùy chọn sử dụng multi-query.
         
         Args:
-            use_multi_query: Có sử dụng multi-query với Gemini hay không
-            n_queries: Số lượng query sinh ra (bao gồm query gốc)
+            num_query: Tổng số query sử dụng (1 = chỉ query gốc, >1 = multi-query với Gemini)
         """
         if not self.initialized:
             raise RuntimeError("Retriever is not initialized.")
 
         start_time = time.time()
         
-        if use_multi_query and n_queries > 1 and self.llm:
-            logger.info(f"Using multi-query search with {n_queries} queries")
+        if num_query > 1:
+            logger.info(f"Using multi-query search with {num_query} total queries")
             
             # Sinh ra các query tương tự
-            enhanced_queries = self._generate_enhanced_queries(text_query, n_queries)
+            enhanced_queries = self._generate_enhanced_queries(text_query, num_query)
             
             # Tìm kiếm với nhiều query
             all_candidates = await self._search_with_multiple_queries(
@@ -598,10 +403,30 @@ Chỉ trả về {n_queries} câu query, mỗi câu một dòng, không cần s�
         else: output_fields = []
 
         expr_new = self.build_expr(expr, user_query)
-        search_results = collection.search(
-            data=[vector], anns_field="vector", param={"metric_type": "COSINE", "params": {"nprobe": 16}},
-            limit=top_k, expr=expr_new, output_fields=output_fields,
-        )[0]
+        
+        # Thử search, nếu lỗi "not loaded" thì reload và thử lại
+        try:
+            search_results = collection.search(
+                data=[vector], anns_field="vector", param={"metric_type": "COSINE", "params": {"nprobe": 16}},
+                limit=top_k, expr=expr_new, output_fields=output_fields,
+            )[0]
+        except Exception as e:
+            if "collection not loaded" in str(e).lower():
+                logger.warning(f"Collection '{collection_name}' was unloaded, reloading...")
+                try:
+                    collection.load()
+                    # Thử search lại sau khi reload
+                    search_results = collection.search(
+                        data=[vector], anns_field="vector", param={"metric_type": "COSINE", "params": {"nprobe": 16}},
+                        limit=top_k, expr=expr_new, output_fields=output_fields,
+                    )[0]
+                    logger.info(f"Successfully reloaded and searched collection '{collection_name}'")
+                except Exception as reload_error:
+                    logger.error(f"Failed to reload collection '{collection_name}': {reload_error}")
+                    return []
+            else:
+                logger.error(f"Search failed: {e}")
+                return []
 
         hits = []
         for hit in search_results:
@@ -1051,6 +876,216 @@ Chỉ trả về {n_queries} câu query, mỗi câu một dòng, không cần s�
                 info.setdefault('reasons', []).append(f"ASR dynamic match (score={int(score)}, boost={boost:.3f})")
                 matched_count += 1
         #logger.info(f"ASR filter: {matched_count}/{len(candidate_info)} candidates boosted")
+
+    def _generate_enhanced_queries(self, original_query: str, num_query: int = 1) -> List[str]:
+        """
+        Sử dụng Gemini để sinh ra num_query câu query từ câu gốc.
+        
+        Args:
+            original_query: Câu query gốc
+            num_query: Tổng số câu query cần có (bao gồm cả câu gốc)
+            
+        Returns:
+            List[str]: Danh sách num_query câu query (câu đầu tiên là câu gốc)
+        """
+        if num_query <= 1:
+            return [original_query]
+            
+        if not self.llm:
+            logger.warning("Gemini LLM not available, falling back to single query")
+            return [original_query]
+            
+        n_additional = num_query - 1  # Số câu cần sinh thêm
+        
+        try:
+            prompt = f"""
+Bạn là một chuyên gia về tìm kiếm hình ảnh và video. Nhiệm vụ của bạn là tạo ra {n_additional} câu query tìm kiếm tương tự từ câu gốc để tối ưu cho mô hình CLIP.
+
+Câu query gốc: "{original_query}"
+
+Yêu cầu:
+1. Nếu câu gốc là tiếng Việt, hãy dịch sang tiếng Anh
+2. Tạo thêm {n_additional} câu query khác có liên quan, liên tưởng
+3. Các câu query phải:
+   - Mô tả cụ thể, rõ ràng về đối tượng, hành động, màu sắc, bối cảnh
+   - Phù hợp với khả năng hiểu của mô hình CLIP
+   - Có độ đa dạng về góc nhìn nhưng vẫn liên quan đến ý nghĩa gốc
+   - Ngắn gọn, súc tích (10-15 từ)
+
+Ví dụ:
+- Query gốc: "người đàn ông mặc áo đỏ"
+- Kết quả: 
+  1. "man wearing red shirt"
+  2. "person in red clothing"
+  3. "male with red garment"
+
+Chỉ trả về {n_additional} câu query, mỗi câu một dòng, không cần số thứ tự hay giải thích:
+"""
+
+            response = self.llm.invoke(prompt)
+            logger.info(response)
+            generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
+            
+            # Đảm bảo có đúng số câu
+            if len(generated_queries) < n_additional:
+                # Nếu không đủ, thêm một số biến thể đơn giản
+                while len(generated_queries) < n_additional:
+                    generated_queries.append(f"image of {original_query}")
+            elif len(generated_queries) > n_additional:
+                generated_queries = generated_queries[:n_additional]
+            
+            # Kết hợp câu gốc với các câu được sinh ra
+            final_queries = [original_query] + generated_queries
+            
+            logger.info(f"Generated {len(final_queries)} total queries from: '{original_query}'")
+            for i, query in enumerate(final_queries):
+                logger.info(f"  Query {i+1}: '{query}'")
+                
+            return final_queries
+            
+        except Exception as e:
+            logger.error(f"Failed to generate enhanced queries with Gemini: {e}")
+            # Fallback: trả về câu gốc
+            return [original_query]
+
+    async def _search_with_multiple_queries(self, queries: List[str], mode: str, user_query: str, 
+                                          object_filters: Optional[Dict], color_filters: Optional[List],
+                                          ocr_query: Optional[str], asr_query: Optional[str],
+                                          top_k: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Thực hiện tìm kiếm với nhiều query và tổng hợp kết quả.
+        """
+        all_candidates = {}
+        query_results = []
+        
+        # Tìm kiếm với từng query
+        for i, query in enumerate(queries):
+            try:
+                logger.info(f"Searching with query {i+1}/{len(queries)}: '{query}'")
+                
+                # Tìm kiếm với query hiện tại
+                results = await self._single_query_search(
+                    query, mode, user_query, object_filters, color_filters, 
+                    ocr_query, asr_query, top_k * 2  # Lấy nhiều hơn để có đủ kết quả đa dạng
+                )
+                
+                query_results.append(results)
+                
+                # Tích lũy kết quả vào all_candidates
+                for result in results:
+                    kf_id = result['keyframe_id']
+                    if kf_id not in all_candidates:
+                        all_candidates[kf_id] = {
+                            'keyframe_id': kf_id,
+                            'video_id': result['video_id'],
+                            'timestamp': result['timestamp'],
+                            'scores': [],
+                            'all_reasons': [],
+                            'metadata': result['metadata']
+                        }
+                    
+                    all_candidates[kf_id]['scores'].append(result['score'])
+                    all_candidates[kf_id]['all_reasons'].extend([f"Q{i+1}: {reason}" for reason in result['reasons']])
+                    
+            except Exception as e:
+                print(np.__version__)
+                logger.error(f"Error searching with query '{query}': {e}")
+                continue
+        
+        return all_candidates
+
+    async def _single_query_search(self, text_query: str, mode: str, user_query: str, 
+                                 object_filters: Optional[Dict], color_filters: Optional[List],
+                                 ocr_query: Optional[str], asr_query: Optional[str],
+                                 top_k: int) -> List[Dict[str, Any]]:
+        """
+        Thực hiện tìm kiếm với một query duy nhất (logic gốc).
+        """
+        candidate_info: Dict[str, Dict[str, Any]] = {}
+        
+        # BƯỚC 1: LẤY ỨNG VIÊN BAN ĐẦU
+        tasks = []
+        if mode in ['hybrid', 'clip']:
+            clip_vector = self.get_clip_text_embedding(text_query).tolist()
+            tasks.append(self._search_milvus_async(settings.CLIP_COLLECTION, clip_vector,
+                                                   top_k, None, user_query, 'clip'))
+        if mode == 'beit3':
+            beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
+            tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector,
+                                                   top_k, None, user_query, 'beit3'))
+
+        search_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, result in enumerate(search_results):
+            if isinstance(result, Exception):
+                logger.error(f"Search task {i} failed: {result}")
+                continue
+            search_type = 'clip' if (mode in ['hybrid', 'clip'] and i == 0) else 'beit3'
+            self._process_search_results(result, candidate_info, search_type)
+
+        # BƯỚC 2, 3, 4: TINH CHỈNH, LỌC VÀ TĂNG ĐIỂM
+        refinement_tasks = []
+        if mode == 'hybrid' and candidate_info:
+            refinement_tasks.append(self._async_hybrid_reranking(candidate_info, text_query))
+        if object_filters or color_filters:
+            refinement_tasks.append(self._apply_object_color_filters_optimized(
+                candidate_info, object_filters, color_filters, top_k))
+        if ocr_query:
+            refinement_tasks.append(self._async_apply_ocr_filter(candidate_info, ocr_query))
+        if asr_query:
+            refinement_tasks.append(self._async_apply_asr_filter(candidate_info, asr_query))
+
+        if refinement_tasks:
+            await asyncio.gather(*refinement_tasks, return_exceptions=True)
+
+        # Trả về kết quả đã format
+        sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
+        return self._format_results(sorted_results[:top_k])
+
+    def _aggregate_multi_query_results(self, all_candidates: Dict[str, Dict], top_k: int) -> List[Dict[str, Any]]:
+        """
+        Tổng hợp kết quả từ nhiều query và tính điểm trung bình.
+        """
+        final_candidates = {}
+        
+        for kf_id, data in all_candidates.items():
+            scores = data['scores']
+            if not scores:
+                continue
+                
+            # Tính điểm trung bình và các thống kê
+            avg_score = statistics.mean(scores)
+            max_score = max(scores)
+            min_score = min(scores)
+            score_std = statistics.stdev(scores) if len(scores) > 1 else 0
+            
+            # Điểm cuối cùng: trung bình có trọng số với độ ổn định
+            stability_bonus = 1.0 - (score_std / max(avg_score, 0.1))  # Thưởng cho kết quả ổn định
+            final_score = avg_score * (1.0 + 0.1 * stability_bonus)
+            
+            final_candidates[kf_id] = {
+                'keyframe_id': kf_id,
+                'video_id': data['video_id'],
+                'timestamp': data['timestamp'],
+                'score': final_score,
+                'reasons': [
+                    f"Multi-query average: {avg_score:.3f} (from {len(scores)} queries)",
+                    f"Score range: {min_score:.3f} - {max_score:.3f}",
+                    f"Stability bonus: {stability_bonus:.3f}"
+                ] + data['all_reasons'][:5],  # Giới hạn số lý do hiển thị
+                'metadata': {
+                    **data['metadata'],
+                    'query_count': len(scores),
+                    'avg_score': round(avg_score, 4),
+                    'max_score': round(max_score, 4),
+                    'min_score': round(min_score, 4),
+                    'score_std': round(score_std, 4)
+                }
+            }
+        
+        # Sắp xếp và trả về top_k
+        sorted_results = sorted(final_candidates.values(), key=lambda x: x['score'], reverse=True)
+        return sorted_results[:top_k]
 
     def _format_results(self, sorted_candidates: List[Tuple[str, Dict]]) -> List[Dict]:
         return [{

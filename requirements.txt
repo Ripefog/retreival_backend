@@ -36,7 +36,7 @@ rapidfuzz>=3.9.0
 
 # Performance optimization libraries
 scipy>=1.7.0  # For optimized Hungarian algorithm
-numpy>=1.21.0 # For vectorization
+numpy>=1.21.0,<2.0  # For vectorization
 colorspacious # For optimized CIEDE2000 color distance
 redis>=4.5.0  # For distributed caching
 hiredis>=2.0.0  # For faster Redis performance
@@ -49,4 +49,8 @@ nbformat
 ipython
 
 # Gemini API for multi-query search
-langchain-google-genai>=1.0.0
+
+#google-generativeai
+#google-auth
+#google-api-core
+#langchain-core

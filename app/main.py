@@ -151,7 +151,7 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
     try:
         logger.info(f"Raw request data: {request}")
         logger.info(f"Request dict: {request.model_dump()}")
-        logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}'")
+        logger.info(f"Received search request: query='{request.text_query}', mode='{request.mode.value}', num_query={request.num_query}")
         
         # DEBUG: Log object filters specifically
         if request.object_filters:
@@ -164,6 +164,7 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
                         logger.info(f"    Constraint count: {len(filter_spec['constraints'])}")
         else:
             logger.info("🔍 No object filters in request")
+            
         results = await retriever.search(
             text_query=request.text_query,
             mode=request.mode.value,
@@ -173,8 +174,7 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
             ocr_query=request.ocr_query,
             asr_query=request.asr_query,
             top_k=request.top_k,
-            use_multi_query=request.use_multi_query,
-            n_queries=request.n_queries,
+            num_query=request.num_query,  # Sử dụng num_query từ request
         )
         return SearchResponse(query=request.text_query, mode=request.mode, results=results, total_results=len(results))
     except Exception as e:
@@ -209,30 +209,6 @@ async def compare_search_modes(request: SearchRequest = Body(..., examples=compa
         )
         comparison_results[mode] = {"results": results, "total_results": len(results)}
     return {"query": request.text_query, "comparison": comparison_results}
-
-
-@app.post("/process/image-objects", response_model=ImageObjectsResponse, tags=["Processing"])
-async def process_image_for_objects(file: UploadFile = File(..., description="File ảnh để phân tích.")):
-    """
-    **Tải lên một ảnh và nhận diện các đối tượng/màu sắc có trong đó.**
-
-    Sử dụng mô hình Co-DETR. Endpoint này mô phỏng một bước trong pipeline đánh chỉ mục dữ liệu.
-    """
-    if not retriever or not retriever.object_detector:
-        raise HTTPException(status_code=503, detail="Object Detector is not available.")
-
-    # Lưu file tải lên vào một file tạm thời vì Co-DETR yêu cầu đường dẫn file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
-    try:
-        logger.info(f"Processing image for objects: {file.filename}")
-        objects, colors = retriever.detect_objects_in_image(tmp_path)
-        return ImageObjectsResponse(objects=objects, colors=colors)
-    finally:
-        # Đảm bảo dọn dẹp file tạm sau khi xử lý xong
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 @app.get("/optimization/stats", tags=["Optimization"])
