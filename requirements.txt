@@ -47,3 +47,6 @@ nbimporter
 lmdb
 nbformat
 ipython
+
+# Gemini API for multi-query search
+langchain-google-genai>=1.0.0

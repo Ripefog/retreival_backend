@@ -2,7 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+beit3.spm
+beit3_base_patch16_384_coco_retrieval.pth
+open_clip_pytorch_model.bin
 # C extensions
 *.so
 

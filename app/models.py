@@ -67,6 +67,11 @@ class SearchRequest(BaseModel):
     ocr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các keyframe có chứa văn bản này (OCR).")
     asr_query: Optional[str] = Field(default=None, description="Từ khóa để lọc các video có chứa lời thoại này (ASR).")
     top_k: int = Field(default=20, ge=1, le=2000, description="Số lượng kết quả hàng đầu để trả về.")
+    
+    # Multi-query search parameters
+    use_multi_query: bool = Field(default=True, description="Có sử dụng multi-query search với Gemini để sinh ra nhiều câu query tương tự hay không.")
+    n_queries: int = Field(default=5, ge=1, le=10, description="Số lượng câu query sẽ được sinh ra bởi Gemini (bao gồm câu query gốc).")
+    
     # exact_match: bool = Field(default=False, description="Chế độ exact matching: ưu tiên kết quả có object/color filters khớp chính xác.")
 
 

@@ -8,7 +8,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
 import torch
-from PIL import Image
+import statistics
 
 # Performance optimization imports
 from scipy.optimize import linear_sum_assignment
@@ -31,15 +31,9 @@ import sentencepiece as spm
 from torchvision import transforms
 from modeling_finetune import BEiT3ForRetrieval
 
-# Imports cho ObjectColorDetector
-import cv2
-from mmcv import Config
-from mmdet.apis import init_detector, inference_detector
-from sklearn.cluster import KMeans
-from sklearn.neighbors import KDTree
+
 from colormath.color_objects import sRGBColor, LabColor
 from colormath.color_conversions import convert_color
-from colormath.color_diff import delta_e_cie2000
 from icecream import ic
 
 # Import từ các module của ứng dụng
@@ -47,6 +41,14 @@ from .config import settings
 from .database import db_manager
 import numpy as np
 from rapidfuzz import fuzz
+
+# Gemini API import
+try:
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+    logging.warning("langchain-google-genai not available, multi-query search will be disabled")
 
 if not hasattr(np, "asscalar"):
     np.asscalar = lambda a: a.item() if hasattr(a, "item") else np.asarray(a).item()
@@ -104,113 +106,6 @@ class BEiT3Config:
         self.scale_length = 2048
         self.layernorm_eps = 1e-5
 
-
-class ObjectColorDetector:
-    """Sử dụng Co-DETR để phát hiện đối tượng và màu sắc chính của chúng."""
-
-    def __init__(self, device):
-        logger.info("Initializing ObjectColorDetector (Co-DETR)...")
-        self.device = device
-        self.model = init_detector(
-            Config.fromfile(settings.CO_DETR_CONFIG_PATH),
-            settings.CO_DETR_CHECKPOINT_PATH,
-            device=self.device
-        )
-        # Bảng tra cứu màu cơ bản
-        self.basic_colors = {
-            'red': (255, 0, 0), 'green': (0, 255, 0), 'blue': (0, 0, 255),
-            'yellow': (255, 255, 0), 'cyan': (0, 255, 255), 'magenta': (255, 0, 255),
-            'black': (0, 0, 0), 'white': (255, 255, 255), 'gray': (128, 128, 128),
-            'orange': (255, 165, 0), 'brown': (165, 42, 42), 'pink': (255, 192, 203),
-            'purple': (128, 0, 128)
-        }
-        self.color_names = list(self.basic_colors.keys())
-        self.color_tree = KDTree(np.array(list(self.basic_colors.values())))
-        logger.info("✅ Co-DETR model loaded.")
-
-    def _convert_basic_colors_to_lab(self) -> dict:
-        """Chuyển basic_colors sang CIELAB để so sánh nhanh hơn."""
-        lab_dict = {}
-        for name, rgb in self.basic_colors.items():
-            rgb_obj = sRGBColor(*rgb, is_upscaled=True)
-            lab_obj = convert_color(rgb_obj, LabColor)
-            lab_dict[name] = lab_obj
-        return lab_dict
-
-    def _rgb_to_lab(self, rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
-        """Convert RGB tuple to CIELAB tuple."""
-        rgb_obj = sRGBColor(*rgb, is_upscaled=True)
-        lab_obj = convert_color(rgb_obj, LabColor)
-        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
-
-    def _get_closest_color_name(self, rgb: Tuple[int, int, int]) -> str:
-        """Tìm tên màu gần nhất theo thị giác (CIELAB + Delta E CIEDE2000)."""
-        rgb_color = sRGBColor(*rgb, is_upscaled=True)
-        lab_color = convert_color(rgb_color, LabColor)
-
-        min_delta = float('inf')
-        closest_name = None
-
-        for name, lab_ref in self.basic_colors_lab.items():
-            delta = delta_e_cie2000(lab_color, lab_ref)
-            if delta < min_delta:
-                min_delta = delta
-                closest_name = name
-        return closest_name
-
-    def detect(self, image_path: str) -> Tuple[
-        List[Tuple[float, float, float]],
-        Dict[str, List[Tuple[Tuple[float, float, float], Tuple[int, int, int, int]]]]
-    ]:
-        try:
-            result = inference_detector(self.model, image_path)
-            if isinstance(result, tuple):
-                result = result[0]
-
-            img = cv2.imread(image_path)
-            if img is None:
-                raise ValueError("Không đọc được ảnh.")
-
-            # --- MÀU CHỦ ĐẠO TOÀN ẢNH ---
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            flat_pixels = img_rgb.reshape(-1, 3)
-            kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(flat_pixels)
-            dominant_rgb = kmeans.cluster_centers_.astype(int)
-
-            dominant_colors_lab = [self._rgb_to_lab(tuple(color)) for color in dominant_rgb]
-
-            # --- MÀU CỦA TỪNG OBJECT ---
-            object_colors_lab = {}
-
-            for class_id, bboxes in enumerate(result):
-                if class_id >= len(self.model.CLASSES):
-                    continue
-                class_name = self.model.CLASSES[class_id]
-                for bbox in bboxes:
-                    if bbox[4] < 0.5:
-                        continue
-                    x1, y1, x2, y2 = map(int, bbox[:4])
-                    crop = img[y1:y2, x1:x2]
-                    if crop.size == 0:
-                        continue
-
-                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).reshape(-1, 3)
-                    kmeans_obj = KMeans(n_clusters=1, random_state=0, n_init=10).fit(crop_rgb)
-                    dom_rgb = kmeans_obj.cluster_centers_[0].astype(int)
-                    lab_color = self._rgb_to_lab(tuple(dom_rgb))
-
-                    if class_name not in object_colors_lab:
-                        object_colors_lab[class_name] = []
-                    # Thêm vị trí bounding box vào kết quả
-                    object_colors_lab[class_name].append((lab_color, (x1, y1, x2, y2)))
-
-            return dominant_colors_lab, object_colors_lab
-
-        except Exception as e:
-            print(f"Error during detection: {e}")
-            return [], {}
-
-
 class HybridRetriever:
     """Công cụ truy xuất lai, kết hợp các model AI và tìm kiếm đa phương thức."""
 
@@ -221,7 +116,23 @@ class HybridRetriever:
         # Placeholders for models and tokenizers
         self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
         self.beit3_model, self.beit3_preprocess, self.beit3_sp_model = None, None, None
-        self.object_detector: Optional[ObjectColorDetector] = None
+        
+        # Initialize Gemini LLM if available
+        self.llm = None
+        if HAS_GEMINI and settings.GOOGLE_API_KEY:
+            try:
+                self.llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.0-flash-exp",
+                    temperature=0.6,
+                    max_retries=2,
+                    google_api_key=settings.GOOGLE_API_KEY
+                )
+                logger.info("✅ Gemini LLM initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Gemini LLM: {e}")
+                self.llm = None
+        else:
+            logger.warning("Gemini not available - missing dependency or API key")
 
     async def initialize(self):
         """Khởi tạo retriever: kết nối DB và tải model một cách an toàn."""
@@ -239,7 +150,7 @@ class HybridRetriever:
         """Convert RGB tuple to CIELAB tuple."""
         rgb_obj = sRGBColor(*rgb, is_upscaled=True)
         lab_obj = convert_color(rgb_obj, LabColor)
-        return (lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b)
+        return lab_obj.lab_l, lab_obj.lab_a, lab_obj.lab_b
 
     def _load_models(self):
         """Tải tất cả các mô hình AI cần thiết vào đúng device."""
@@ -272,6 +183,7 @@ class HybridRetriever:
             tokens = self.clip_tokenizer([text]).to(self.device)
             text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
             return text_emb / np.linalg.norm(text_emb, axis=0)
+        return None
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
         with torch.no_grad():
@@ -285,6 +197,7 @@ class HybridRetriever:
                 only_infer=True
             )
             return text_emb.cpu().numpy()[0]
+        return None
 
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]],
                                     colors2: List[Tuple[float, float, float]]) -> np.ndarray:
@@ -393,27 +306,125 @@ class HybridRetriever:
             i += 3
         return lab6
 
-    # --- LOGIC TÌM KIẾM CHÍNH ---
-    async def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[Dict],
-                     color_filters: Optional[List], ocr_query: Optional[str], asr_query: Optional[str],
-                     top_k: int) -> List[Dict[str, Any]]:
-        if not self.initialized:
-            raise RuntimeError("Retriever is not initialized.")
+    def _generate_enhanced_queries(self, original_query: str, n_queries: int = 5) -> List[str]:
+        """
+        Sử dụng Gemini để sinh ra n câu query tương tự từ câu gốc.
+        Bao gồm cả việc dịch từ tiếng Việt sang tiếng Anh và tối ưu cho CLIP.
+        """
+        if not self.llm:
+            logger.warning("Gemini not available, using original query only")
+            return [original_query]
+            
+        try:
+            prompt = f"""
+Bạn là một chuyên gia về tìm kiếm hình ảnh và video. Nhiệm vụ của bạn là tạo ra {n_queries} câu query tìm kiếm tương tự từ câu gốc để tối ưu cho mô hình CLIP.
 
-        start_time = time.time()
+Câu query gốc: "{original_query}"
+
+Yêu cầu:
+1. Nếu câu gốc là tiếng Việt, hãy dịch sang tiếng Anh
+2. Tạo thêm {n_queries-1} câu query khác có liên quan, liên tưởng
+3. Các câu query phải:
+   - Mô tả cụ thể, rõ ràng về đối tượng, hành động, màu sắc, bối cảnh
+   - Phù hợp với khả năng hiểu của mô hình CLIP
+   - Có độ đa dạng về góc nhìn nhưng vẫn liên quan đến ý nghĩa gốc
+   - Ngắn gọn, súc tích (10-15 từ)
+
+Ví dụ:
+- Query gốc: "người đàn ông mặc áo đỏ"
+- Kết quả: 
+  1. "man wearing red shirt"
+  2. "person in red clothing"
+  3. "male with red garment"
+  4. "guy dressed in red"
+  5. "man in crimson outfit"
+
+Chỉ trả về {n_queries} câu query, mỗi câu một dòng, không cần số thứ tự hay giải thích:
+"""
+
+            response = self.llm.invoke(prompt)
+            generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
+            
+            # Đảm bảo có đúng n_queries câu
+            if len(generated_queries) < n_queries:
+                # Nếu không đủ, thêm câu gốc và một số biến thể đơn giản
+                generated_queries.append(original_query)
+                while len(generated_queries) < n_queries:
+                    generated_queries.append(f"image of {original_query}")
+            elif len(generated_queries) > n_queries:
+                generated_queries = generated_queries[:n_queries]
+            
+            logger.info(f"Generated {len(generated_queries)} enhanced queries from: '{original_query}'")
+            for i, query in enumerate(generated_queries):
+                logger.info(f"  Query {i+1}: {query}")
+            return generated_queries
+            
+        except Exception as e:
+            logger.error(f"Failed to generate enhanced queries with Gemini: {e}")
+            # Fallback: trả về câu gốc
+            return [original_query]
+
+    async def _search_with_multiple_queries(self, queries: List[str], mode: str, user_query: str, 
+                                          object_filters: Optional[Dict], color_filters: Optional[List],
+                                          ocr_query: Optional[str], asr_query: Optional[str],
+                                          top_k: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Thực hiện tìm kiếm với nhiều query và tổng hợp kết quả.
+        """
+        all_candidates = {}
+        
+        # Tìm kiếm với từng query
+        for i, query in enumerate(queries):
+            try:
+                logger.info(f"Searching with query {i+1}/{len(queries)}: '{query}'")
+                
+                # Tìm kiếm với query hiện tại
+                results = await self._single_query_search(
+                    query, mode, user_query, object_filters, color_filters, 
+                    ocr_query, asr_query, top_k * 2  # Lấy nhiều hơn để có đủ kết quả đa dạng
+                )
+                
+                # Tích lũy kết quả vào all_candidates
+                for result in results:
+                    kf_id = result['keyframe_id']
+                    if kf_id not in all_candidates:
+                        all_candidates[kf_id] = {
+                            'keyframe_id': kf_id,
+                            'video_id': result['video_id'],
+                            'timestamp': result['timestamp'],
+                            'scores': [],
+                            'all_reasons': [],
+                            'metadata': result['metadata']
+                        }
+                    
+                    all_candidates[kf_id]['scores'].append(result['score'])
+                    all_candidates[kf_id]['all_reasons'].extend([f"Q{i+1}: {reason}" for reason in result['reasons']])
+                    
+            except Exception as e:
+                logger.error(f"Error searching with query '{query}': {e}")
+                continue
+        
+        return all_candidates
+
+    async def _single_query_search(self, text_query: str, mode: str, user_query: str, 
+                                 object_filters: Optional[Dict], color_filters: Optional[List],
+                                 ocr_query: Optional[str], asr_query: Optional[str],
+                                 top_k: int) -> List[Dict[str, Any]]:
+        """
+        Thực hiện tìm kiếm với một query duy nhất (logic gốc).
+        """
         candidate_info: Dict[str, Dict[str, Any]] = {}
-        num_initial_candidates = top_k
-
+        
         # BƯỚC 1: LẤY ỨNG VIÊN BAN ĐẦU
         tasks = []
         if mode in ['hybrid', 'clip']:
             clip_vector = self.get_clip_text_embedding(text_query).tolist()
             tasks.append(self._search_milvus_async(settings.CLIP_COLLECTION, clip_vector,
-                                                   num_initial_candidates, None, user_query, 'clip'))
+                                                   top_k, None, user_query, 'clip'))
         if mode == 'beit3':
             beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
             tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector,
-                                                   num_initial_candidates, None, user_query, 'beit3'))
+                                                   top_k, None, user_query, 'beit3'))
 
         search_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -439,12 +450,96 @@ class HybridRetriever:
         if refinement_tasks:
             await asyncio.gather(*refinement_tasks, return_exceptions=True)
 
-        # BƯỚC 5: XẾP HẠNG VÀ TRẢ VỀ
+        # Trả về kết quả đã format
         sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
-        final_results = self._format_results(sorted_results[:top_k])
+        return self._format_results(sorted_results[:top_k])
+
+    def _aggregate_multi_query_results(self, all_candidates: Dict[str, Dict], top_k: int) -> List[Dict[str, Any]]:
+        """
+        Tổng hợp kết quả từ nhiều query và tính điểm trung bình.
+        """
+        final_candidates = {}
+        
+        for kf_id, data in all_candidates.items():
+            scores = data['scores']
+            if not scores:
+                continue
+                
+            # Tính điểm trung bình và các thống kê
+            avg_score = statistics.mean(scores)
+            max_score = max(scores)
+            min_score = min(scores)
+            score_std = statistics.stdev(scores) if len(scores) > 1 else 0
+            
+            # Điểm cuối cùng: trung bình có trọng số với độ ổn định
+            stability_bonus = 1.0 - (score_std / max(avg_score, 0.1))  # Thưởng cho kết quả ổn định
+            final_score = avg_score * (1.0 + 0.1 * stability_bonus)
+            
+            final_candidates[kf_id] = {
+                'keyframe_id': kf_id,
+                'video_id': data['video_id'],
+                'timestamp': data['timestamp'],
+                'score': final_score,
+                'reasons': [
+                    f"Multi-query average: {avg_score:.3f} (from {len(scores)} queries)",
+                    f"Score range: {min_score:.3f} - {max_score:.3f}",
+                    f"Stability bonus: {stability_bonus:.3f}"
+                ] + data['all_reasons'][:5],  # Giới hạn số lý do hiển thị
+                'metadata': {
+                    **data['metadata'],
+                    'query_count': len(scores),
+                    'avg_score': round(avg_score, 4),
+                    'max_score': round(max_score, 4),
+                    'min_score': round(min_score, 4),
+                    'score_std': round(score_std, 4)
+                }
+            }
+        
+        # Sắp xếp và trả về top_k
+        sorted_results = sorted(final_candidates.values(), key=lambda x: x['score'], reverse=True)
+        return sorted_results[:top_k]
+
+    # --- LOGIC TÌM KIẾM CHÍNH ---
+    async def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[Dict],
+                     color_filters: Optional[List], ocr_query: Optional[str], asr_query: Optional[str],
+                     top_k: int, use_multi_query: bool = True, n_queries: int = 5) -> List[Dict[str, Any]]:
+        """
+        Hàm tìm kiếm chính với tùy chọn sử dụng multi-query.
+        
+        Args:
+            use_multi_query: Có sử dụng multi-query với Gemini hay không
+            n_queries: Số lượng query sinh ra (bao gồm query gốc)
+        """
+        if not self.initialized:
+            raise RuntimeError("Retriever is not initialized.")
+
+        start_time = time.time()
+        
+        if use_multi_query and n_queries > 1 and self.llm:
+            logger.info(f"Using multi-query search with {n_queries} queries")
+            
+            # Sinh ra các query tương tự
+            enhanced_queries = self._generate_enhanced_queries(text_query, n_queries)
+            
+            # Tìm kiếm với nhiều query
+            all_candidates = await self._search_with_multiple_queries(
+                enhanced_queries, mode, user_query, object_filters, color_filters,
+                ocr_query, asr_query, top_k
+            )
+            
+            # Tổng hợp kết quả
+            final_results = self._aggregate_multi_query_results(all_candidates, top_k)
+            
+        else:
+            logger.info("Using single query search")
+            # Tìm kiếm với query gốc (logic cũ)
+            final_results = await self._single_query_search(
+                text_query, mode, user_query, object_filters, color_filters,
+                ocr_query, asr_query, top_k
+            )
 
         search_time = time.time() - start_time
-        #logger.info(f"Search completed in {search_time:.2f}s with {len(final_results)} results")
+        logger.info(f"Search completed in {search_time:.2f}s with {len(final_results)} results")
         return final_results
 
     async def _search_milvus_async(self, collection_name: str, vector: List[float], top_k: int,
@@ -488,6 +583,7 @@ class HybridRetriever:
                 user_expr = f'user in {filtered_users}'
                 if expr: expr = f'({expr}) && ({user_expr})'
                 else: expr = user_expr
+            # return expr
         return expr
 
     async def _search_milvus(self, collection_name: str, vector: List[float], top_k: int,

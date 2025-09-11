@@ -173,6 +173,8 @@ async def search_videos(request: SearchRequest = Body(..., examples=search_examp
             ocr_query=request.ocr_query,
             asr_query=request.asr_query,
             top_k=request.top_k,
+            use_multi_query=request.use_multi_query,
+            n_queries=request.n_queries,
         )
         return SearchResponse(query=request.text_query, mode=request.mode, results=results, total_results=len(results))
     except Exception as e:
