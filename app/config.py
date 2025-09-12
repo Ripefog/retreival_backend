@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # --- Milvus Configuration ---
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
-    MILVUS_PORT: int = 15380
+    MILVUS_PORT: int = 10014
     MILVUS_ALIAS: str = "default"
     MILVUS_USER: str = "root"
     MILVUS_PASSWORD: str = "aiostorm"
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # --- Elasticsearch/OpenSearch Configuration ---
     ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 10184
+    ELASTICSEARCH_PORT: int = 16394
     ELASTICSEARCH_USERNAME: str = "elastic"
     ELASTICSEARCH_PASSWORD: str = "aiostorm"
     ELASTICSEARCH_USE_SSL: bool = False
