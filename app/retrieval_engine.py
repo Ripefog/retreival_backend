@@ -899,43 +899,53 @@ class HybridRetriever:
         
         try:
             prompt = f"""
-Bạn là một chuyên gia về tìm kiếm hình ảnh và video. Nhiệm vụ của bạn là tạo ra {n_additional} câu query tìm kiếm tương tự từ câu gốc để tối ưu cho mô hình CLIP.
+Bạn là bộ sinh truy vấn cho hệ thống retrieval.
+Nhiệm vụ: Từ PROMPT_GỐC dưới đây, hãy tạo ra {n_additional} biến thể diễn đạt khác nhau nhưng giữ nguyên ý nghĩa và ràng buộc.
 
-Câu query gốc: "{original_query}"
+YÊU CẦU:
+- Không thêm/bớt thông tin hay giả định mới; giữ nguyên thực thể, số liệu, phạm vi thời gian.
+- Đa dạng cấu trúc cách mô tả nhưng không thay đổi ý.
+- Tránh trùng lặp: mỗi biến thể phải khác nhau rõ rệt.
+- Ngôn ngữ: output tiếng anh (dù prompt gốc query vào có là tiếng việt hay tiếng anh).
+- Chỉ trả về danh sách như bên dưới, không thêm câu dẫn dạng "Here's a list of query variations based on the original prompt:": 
+1. Query gốc (ở dạng tiếng anh)
+2. Biến thể 1
+3. Biến thể 2
+...
 
-Yêu cầu:
-1. Nếu câu gốc là tiếng Việt, hãy dịch sang tiếng Anh
-2. Tạo thêm {n_additional} câu query khác có liên quan, liên tưởng
-3. Các câu query phải:
-   - Mô tả cụ thể, rõ ràng về đối tượng, hành động, màu sắc, bối cảnh
-   - Phù hợp với khả năng hiểu của mô hình CLIP
-   - Có độ đa dạng về góc nhìn nhưng vẫn liên quan đến ý nghĩa gốc
-   - Ngắn gọn, súc tích (10-15 từ)
-
-Ví dụ:
-- Query gốc: "người đàn ông mặc áo đỏ"
-- Kết quả: 
-  1. "man wearing red shirt"
-  2. "person in red clothing"
-  3. "male with red garment"
-
-Chỉ trả về {n_additional} câu query, mỗi câu một dòng, không cần số thứ tự hay giải thích:
+Câu query gốc là: "{original_query}"
 """
 
             response = self.llm.invoke(prompt)
             logger.info(response)
             generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
             
-            # Đảm bảo có đúng số câu
-            if len(generated_queries) < n_additional:
-                # Nếu không đủ, thêm một số biến thể đơn giản
-                while len(generated_queries) < n_additional:
-                    generated_queries.append(f"image of {original_query}")
-            elif len(generated_queries) > n_additional:
-                generated_queries = generated_queries[:n_additional]
+            # Lọc bỏ câu trùng lặp và đảm bảo khác nhau
+            unique_queries = []
+            seen_queries = set()
             
-            # Kết hợp câu gốc với các câu được sinh ra
-            final_queries = [original_query] + generated_queries
+            for query in generated_queries:
+                # Normalize để so sánh
+                normalized = ' '.join(sorted(query.lower().split()))
+                if normalized not in seen_queries:
+                    unique_queries.append(query)
+                    seen_queries.add(normalized)
+            
+            # Nếu không đủ câu unique, thêm biến thể
+            while len(unique_queries) < n_additional:
+                fallback_query = f"image showing {original_query}"
+                if fallback_query not in unique_queries:
+                    unique_queries.append(fallback_query)
+                else:
+                    unique_queries.append(f"visual of {original_query}")
+                    break
+            
+            # Giới hạn số câu
+            if len(unique_queries) > n_additional:
+                unique_queries = unique_queries[:n_additional]
+            
+            # Đã kết hợp câu gốc với các câu được sinh ra
+            final_queries = unique_queries
             
             logger.info(f"Generated {len(final_queries)} total queries from: '{original_query}'")
             for i, query in enumerate(final_queries):
