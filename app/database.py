@@ -38,7 +38,13 @@ class DatabaseManager:
             logger.info(f"Connecting to Milvus at {params['host']}:{params['port']} (User: {params.get('user', 'N/A')})...")
             # logger.info(f"Connecting to Milvus at cloud")
 
-            connections.connect(**params)
+            connections.connect(
+                alias="default",
+                host=params['host'],
+                port=params['port'],
+                user="root",
+                password="aiostorm"
+            )
 
             if connections.has_connection(settings.MILVUS_ALIAS):
                 self.milvus_connected = True

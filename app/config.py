@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # --- Milvus Configuration ---
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
-    MILVUS_PORT: int = 10014
+    MILVUS_PORT: int = 11421
     MILVUS_ALIAS: str = "default"
     MILVUS_USER: str = "root"
     MILVUS_PASSWORD: str = "aiostorm"
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # --- Elasticsearch/OpenSearch Configuration ---
     ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 16394
+    ELASTICSEARCH_PORT: int = 15419
     ELASTICSEARCH_USERNAME: str = "elastic"
     ELASTICSEARCH_PASSWORD: str = "aiostorm"
     ELASTICSEARCH_USE_SSL: bool = False
@@ -48,9 +48,9 @@ class Settings(BaseSettings):
     ASR_INDEX: str = 'video_transcripts_v100'
 
     # --- Model Paths ---
-    CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "models/clip_model.bin")
-    BEIT3_MODEL_PATH: str = os.environ.get("BEIT3_MODEL_PATH", "models/beit3_base_patch16_384_coco_retrieval.pth")
-    BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "models/beit3.spm")
+    CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "/app/models/clip_model.bin")
+    BEIT3_MODEL_PATH: str = os.environ.get("BEIT3_MODEL_PATH", "/app/models/beit3_base_patch16_384_coco_retrieval.pth")
+    BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "/app/models/beit3.spm")
 
     # --- Model & Processing Configuration ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -69,7 +69,13 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     ENABLE_REDIS_CACHE: bool = True
-
+    COLOR_COLLECTION: str = "arch_color_name_v3"
+    CO_DETR_CONFIG_PATH: str = ""
+    CO_DETR_CHECKPOINT_PATH: str = ""
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = "logs/app.log"
+    DEBUG: bool = False
+    ENVIRONMENT: str = "development"
     # --- Gemini API Configuration ---
     GOOGLE_API_KEY: Optional[str] = Field(
         default=None, 

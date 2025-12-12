@@ -20,8 +20,8 @@ RUN apt-get update && \
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1 && \
-    python3.9 -m ensurepip --upgrade && \
-    python3.9 -m pip install --no-cache-dir --upgrade pip
+    apt-get update && apt-get install -y python3-pip && \
+    pip3 install --no-cache-dir --upgrade pip
 
 WORKDIR /app
 
@@ -55,7 +55,10 @@ RUN git clone https://github.com/microsoft/unilm.git /app/unilm && \
     sed -i '/numpy/d' /app/unilm/beit3/requirements.txt && \
     pip install --no-cache-dir -r /app/unilm/beit3/requirements.txt && \
     pip uninstall -y protobuf && pip install --no-cache-dir protobuf==3.20.3 && \
-    find /app/unilm/beit3 -name "*.py" -exec sed -i 's/from torch._six import inf/inf = float("inf")/g' {} \;
+    find /app/unilm/beit3 -name "*.py" -exec sed -i 's/from torch._six import inf/inf = float("inf")/g' {} \; && \
+    echo "=== Files in /app/unilm/beit3 ===" && \
+    find /app/unilm/beit3 -maxdepth 1 -name "*.py" -type f && \
+    echo "================================="
 
 # Cài đặt icecream cho debugging
 RUN pip install icecream

@@ -125,7 +125,9 @@ docker build -t video-retrieval-backend-base --target base .
 docker build -t video-retrieval-backend --target runtime .
 
 docker build -t video-retrieval-backend .
-docker run (--gpus all) -p 8000:8000 video-retrieval-backend
+docker run --gpus all -p 8000:8000 video-retrieval-backend
+docker run --gpus all -p 8000:8000 -v ${PWD}:/app video-retrieval-backend
+
 ```
 
 ## 📡 API Endpoints

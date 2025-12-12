@@ -3,7 +3,6 @@
 import logging
 import time
 import os
-import sys
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
@@ -20,14 +19,23 @@ except ImportError:
     HAS_COLORSPACIOUS = False
     logging.warning("colorspacious not available, falling back to faster Euclidean distance")
 
-# Thêm đường dẫn tới các repo phụ thuộc mà không có trong PyPI
-sys.path.append('/app/unilm/beit3')
-
 # Import từ các thư viện ML
 import open_clip
 import sentencepiece as spm
 from torchvision import transforms
-from modeling_finetune import BEiT3ForRetrieval
+
+# Import BEiT3 từ thư mục app/ hiện tại
+try:
+    from .modeling_finetune import BEiT3ForRetrieval
+except ImportError:
+    # Fallback: thử import trực tiếp nếu chạy standalone
+    try:
+        from modeling_finetune import BEiT3ForRetrieval
+    except ImportError as e:
+        raise ImportError(
+            f"Cannot import 'modeling_finetune': {e}. "
+            "Make sure modeling_finetune.py, modeling_utils.py, and utils.py are in the app/ directory"
+        )
 
 
 from colormath.color_objects import sRGBColor, LabColor
@@ -110,7 +118,7 @@ class HybridRetriever:
 
     def __init__(self):
         self.db_manager = db_manager
-        self.device = settings.DEVICE
+        self.device = "cuda"
         self.initialized = False
         # Placeholders for models and tokenizers
         self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
@@ -159,7 +167,7 @@ class HybridRetriever:
 
         # 1. Tải CLIP
         self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
-            model_name='ViT-H-14', pretrained=settings.CLIP_MODEL_PATH, device=self.device)
+            model_name='ViT-H-14', pretrained=settings.CLIP_MODEL_PATH if os.path.exists(settings.CLIP_MODEL_PATH) else "laion2b_s32b_b79k", device=self.device)
         self.clip_model.eval()
         self.clip_tokenizer = open_clip.get_tokenizer('ViT-H-14')
         logger.info("  - CLIP model loaded.")
