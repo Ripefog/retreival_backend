@@ -29,23 +29,23 @@ class Settings(BaseSettings):
     MILVUS_PASSWORD: str = "aiostorm"
     MILVUS_USE_SECURE: bool = False  # Thêm option này cho SSL/TLS
 
-    # --- Elasticsearch/OpenSearch Configuration ---
-    ELASTICSEARCH_HOST: str = "0.tcp.ap.ngrok.io"
-    ELASTICSEARCH_PORT: int = 15419
-    ELASTICSEARCH_USERNAME: str = "elastic"
-    ELASTICSEARCH_PASSWORD: str = "aiostorm"
-    ELASTICSEARCH_USE_SSL: bool = False
-    ELASTICSEARCH_VERIFY_CERTS: bool = False  # Thêm option này
+    # --- OpenSearch Configuration ---
+    OPENSEARCH_HOST: str = "localhost"
+    OPENSEARCH_PORT: int = 9200
+    OPENSEARCH_USERNAME: str = "admin"
+    OPENSEARCH_PASSWORD: str = "admin"
+    OPENSEARCH_USE_SSL: bool = False
+    OPENSEARCH_VERIFY_CERTS: bool = False
 
     # --- Milvus Collection Names ---
     METACLIP2_COLLECTION: str = "arch_metaclip2_image_v100"
     BEIT3_COLLECTION: str = "arch_beit3_large_itc_image_v100"
     OBJECT_COLLECTION: str = "arch_metaclip2_object_name_v100"
 
-    # --- Elasticsearch Index Names ---
+    # --- OpenSearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
-    OCR_INDEX: str = 'ocr_v100'
-    ASR_INDEX: str = 'video_transcripts_v100'
+    OCR_INDEX: str = 'video_ocr'
+    ASR_INDEX: str = 'video_asr'
 
     # --- Model Paths ---
     METACLIP2_MODEL_NAME: str = "facebook/metaclip-2-worldwide-huge-quickgelu"
@@ -132,14 +132,14 @@ class Settings(BaseSettings):
 
         return params
 
-    def get_elasticsearch_connection_params(self) -> dict:
-        """Trả về dictionary chứa các tham số kết nối Elasticsearch."""
+    def get_opensearch_connection_params(self) -> dict:
+        """Trả về dictionary chứa các tham số kết nối OpenSearch."""
         params = {
-            "hosts": [f"{self.ELASTICSEARCH_HOST}:{self.ELASTICSEARCH_PORT}"],
-            "http_auth": (self.ELASTICSEARCH_USERNAME,
-                          self.ELASTICSEARCH_PASSWORD) if self.ELASTICSEARCH_USERNAME and self.ELASTICSEARCH_PASSWORD else None,
-            "use_ssl": self.ELASTICSEARCH_USE_SSL,
-            "verify_certs": self.ELASTICSEARCH_VERIFY_CERTS,
+            "hosts": [{"host": self.OPENSEARCH_HOST, "port": self.OPENSEARCH_PORT}],
+            "http_auth": (self.OPENSEARCH_USERNAME,
+                          self.OPENSEARCH_PASSWORD) if self.OPENSEARCH_USERNAME and self.OPENSEARCH_PASSWORD else None,
+            "use_ssl": self.OPENSEARCH_USE_SSL,
+            "verify_certs": self.OPENSEARCH_VERIFY_CERTS,
             "ssl_show_warn": False
         }
 
@@ -161,13 +161,13 @@ class Settings(BaseSettings):
             logger.warning("Milvus authentication not configured. Using default connection.")
         return True
 
-    def check_elasticsearch_config(self) -> bool:
-        """Kiểm tra cấu hình Elasticsearch."""
-        if not self.ELASTICSEARCH_HOST or not self.ELASTICSEARCH_PORT:
-            logger.error("Elasticsearch host or port is not configured.")
+    def check_opensearch_config(self) -> bool:
+        """Kiểm tra cấu hình OpenSearch."""
+        if not self.OPENSEARCH_HOST or not self.OPENSEARCH_PORT:
+            logger.error("OpenSearch host or port is not configured.")
             return False
-        if not self.ELASTICSEARCH_USERNAME or not self.ELASTICSEARCH_PASSWORD:
-            logger.warning("Elasticsearch authentication not configured. Using default connection.")
+        if not self.OPENSEARCH_USERNAME or not self.OPENSEARCH_PASSWORD:
+            logger.warning("OpenSearch authentication not configured. Using default connection.")
         return True
 
     def check_model_paths(self) -> bool:
@@ -192,13 +192,13 @@ logger.info("--- Application Configuration Loaded ---")
 logger.info(f"Device: {settings.DEVICE.upper()}")
 logger.info(f"Milvus: {settings.MILVUS_HOST}:{settings.MILVUS_PORT} (User: {settings.MILVUS_USER})")
 logger.info(
-    f"Elasticsearch: {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT} (User: {settings.ELASTICSEARCH_USERNAME})")
+    f"OpenSearch: {settings.OPENSEARCH_HOST}:{settings.OPENSEARCH_PORT} (User: {settings.OPENSEARCH_USERNAME})")
 logger.info(f"API: http://{settings.API_HOST}:{settings.API_PORT}")
 logger.info("------------------------------------")
 
 # Kiểm tra cấu hình
 settings.check_milvus_config()
-settings.check_elasticsearch_config()
+settings.check_opensearch_config()
 if not settings.check_model_paths():
     logger.warning("Some model paths are invalid. Check your model configuration.")
 # --- END OF FILE app/config.py ---

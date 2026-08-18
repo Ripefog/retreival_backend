@@ -12,7 +12,7 @@ Backend API cho hệ thống tìm kiếm video đa phương thức với hybrid 
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │  Elasticsearch  │
+                       │  OpenSearch  │
                        │  (Text Search)  │
                        └─────────────────┘
 ```
@@ -36,7 +36,7 @@ Backend API cho hệ thống tìm kiếm video đa phương thức với hybrid 
 ### 3. Database Integration
 
 - **Milvus**: Vector database cho embeddings
-- **Elasticsearch**: Text search cho OCR/ASR
+- **OpenSearch**: Text search cho OCR/ASR
 - **Ngrok Tunnels**: Remote access support
 
 ### 4. UI Input Processing
@@ -86,10 +86,10 @@ MILVUS_URI=https://in03-e40f88db343fc76.serverless.aws-eu-central-1.cloud.zilliz
 MILVUS_TOKEN=b7c8cee41ac36a48967f63a899e22b4ec6d6f2a33cedb8b0b72bbee43fc28bfcf1a109b171703871837b08d45e0fc14697a6a770
 MILVUS_ALIAS=default
 
-# Elasticsearch Configuration (via ngrok)
-ELASTICSEARCH_HOST=0.tcp.ap.ngrok.io
-ELASTICSEARCH_PORT=9200
-ELASTICSEARCH_USE_SSL=true
+# OpenSearch Configuration (via ngrok)
+OPENSEARCH_HOST=0.tcp.ap.ngrok.io
+OPENSEARCH_PORT=9200
+OPENSEARCH_USE_SSL=true
 
 # API Configuration
 API_HOST=0.0.0.0
@@ -171,7 +171,7 @@ Response:
       }
     }
   },
-  "elasticsearch": {
+  "opensearch": {
     "status": "connected",
     "connected": true,
     "indices": {
@@ -534,8 +534,8 @@ Response:
 | -------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `MILVUS_URI`         | Milvus Cloud URI   | `https://in03-e40f88db343fc76.serverless.aws-eu-central-1.cloud.zilliz.com`                                |
 | `MILVUS_TOKEN`       | Milvus Cloud token | `b7c8cee41ac36a48967f63a899e22b4ec6d6f2a33cedb8b0b72bbee43fc28bfcf1a109b171703871837b08d45e0fc14697a6a770` |
-| `ELASTICSEARCH_HOST` | Elasticsearch host | `0.tcp.ap.ngrok.io`                                                                                        |
-| `ELASTICSEARCH_PORT` | Elasticsearch port | `9200`                                                                                                     |
+| `OPENSEARCH_HOST` | OpenSearch host | `0.tcp.ap.ngrok.io`                                                                                        |
+| `OPENSEARCH_PORT` | OpenSearch port | `9200`                                                                                                     |
 | `DEVICE`             | Device for models  | `cuda`                                                                                                     |
 | `API_HOST`           | API host           | `0.0.0.0`                                                                                                  |
 | `API_PORT`           | API port           | `8000`                                                                                                     |
@@ -573,7 +573,7 @@ Response:
 
 ### 3. Text Filtering (OCR/ASR)
 
-- Search trong Elasticsearch indices
+- Search trong OpenSearch indices
 - Filter theo OCR text matches
 - Filter theo ASR transcript matches
 
@@ -633,7 +633,7 @@ docker build -t video-retrieval-backend .
 docker run -d \
   -p 8000:8000 \
   -e MILVUS_HOST=your-milvus-host \
-  -e ELASTICSEARCH_HOST=your-es-host \
+  -e OPENSEARCH_HOST=your-opensearch-host \
   video-retrieval-backend
 ```
 
@@ -724,7 +724,7 @@ python test_api.py
    echo $MILVUS_TOKEN
    ```
 
-2. **Elasticsearch Connection Failed**
+2. **OpenSearch Connection Failed**
 
    ```bash
    # Check ES tunnel
@@ -790,5 +790,5 @@ MIT License - see LICENSE file for details.
 - [CLIP](https://github.com/openai/CLIP) - OpenAI's CLIP model
 - [BEIT-3](https://github.com/microsoft/unilm/tree/master/beit3) - Microsoft's BEIT-3 model
 - [Milvus](https://milvus.io/) - Vector database
-- [Elasticsearch](https://www.elastic.co/) - Search engine
+- [OpenSearch](https://www.elastic.co/) - Search engine
 - [FastAPI](https://fastapi.tiangolo.com/) - Web framework

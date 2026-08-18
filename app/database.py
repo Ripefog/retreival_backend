@@ -10,22 +10,23 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Quản lý tập trung các kết nối đến Milvus và Elasticsearch.
+    Quản lý tập trung các kết nối đến Milvus và OpenSearch.
     Được thiết kế để là một singleton instance trong ứng dụng.
     """
     def __init__(self):
         self.milvus_connected: bool = False
-        self.elasticsearch_connected: bool = False
+        self.opensearch_connected: bool = False
         self.collections: Dict[str, Collection] = {}
-        self.es_client: Optional[OpenSearch] = None
-    
+        self.opensearch_client: Optional[OpenSearch] = None
+
+
     async def connect_all(self):
         """Kết nối đến tất cả các cơ sở dữ liệu được cấu hình."""
         logger.info("Establishing database connections...")
         await self.connect_milvus()
-        await self.connect_elasticsearch()
+        await self.connect_opensearch()
 
-        if not self.milvus_connected or not self.elasticsearch_connected:
+        if not self.milvus_connected or not self.opensearch_connected:
             logger.warning("⚠️ One or more databases unreachable. Server starting in standalone mode.")
         else:
             logger.info("✅ All database connections established successfully.")
@@ -52,24 +53,25 @@ class DatabaseManager:
             self.milvus_connected = False
 
 
-    async def connect_elasticsearch(self):
-        """Thiết lập kết nối đến máy chủ Elasticsearch/OpenSearch."""
+    async def connect_opensearch(self):
+        """Thiết lập kết nối đến máy chủ OpenSearch."""
         try:
-            params = settings.get_elasticsearch_connection_params()
-            logger.info(f"Connecting to Elasticsearch at {settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT} (User: {settings.ELASTICSEARCH_USERNAME})...")
+            params = settings.get_opensearch_connection_params()
+            protocol = "https" if settings.OPENSEARCH_USE_SSL else "http"
+            logger.info(f"Connecting to OpenSearch at {protocol}://{settings.OPENSEARCH_HOST}:{settings.OPENSEARCH_PORT} (User: {settings.OPENSEARCH_USERNAME})...")
 
-            self.es_client = OpenSearch(**params)
+            self.opensearch_client = OpenSearch(**params)
             
-            if self.es_client.ping():
-                self.elasticsearch_connected = True
-                logger.info("✅ Elasticsearch connected.")
+            if self.opensearch_client.ping():
+                self.opensearch_connected = True
+                logger.info("✅ OpenSearch connected.")
             else:
-                logger.error("❌ Elasticsearch connection ping failed.")
-                self.elasticsearch_connected = False
+                logger.error("❌ OpenSearch connection ping failed.")
+                self.opensearch_connected = False
                 
         except Exception as e:
-            logger.error(f"❌ Elasticsearch connection failed with an exception: {e}", exc_info=True)
-            self.elasticsearch_connected = False
+            logger.error(f"❌ OpenSearch connection failed with an exception: {e}", exc_info=True)
+            self.opensearch_connected = False
 
     
     async def _load_milvus_collections(self):
@@ -114,22 +116,23 @@ class DatabaseManager:
             return {"status": "disconnected", "error": "Connection lost"}
         except Exception as e: return {"status": "error", "detail": str(e)}
     
-    def check_elasticsearch_connection(self) -> Dict[str, Any]:
-        """Kiểm tra trạng thái kết nối Elasticsearch và thông tin các index."""
-        if not self.elasticsearch_connected or not self.es_client: return {"status": "disconnected"}
+    def check_opensearch_connection(self) -> Dict[str, Any]:
+        """Kiểm tra trạng thái kết nối OpenSearch và thông tin các index."""
+        if not self.opensearch_connected or not self.opensearch_client: return {"status": "disconnected"}
         try:
-            if self.es_client.ping():
+            if self.opensearch_client.ping():
                 indices = [settings.OCR_INDEX, settings.ASR_INDEX, settings.METADATA_INDEX]
                 indices_info = {}
                 for index in indices:
                     try:
-                        exists = self.es_client.indices.exists(index=index)
-                        doc_count = self.es_client.count(index=index)['count'] if exists else 0
+                        exists = self.opensearch_client.indices.exists(index=index)
+                        doc_count = self.opensearch_client.count(index=index)['count'] if exists else 0
                         indices_info[index] = {"exists": exists, "doc_count": doc_count}
                     except Exception: indices_info[index] = {"exists": False, "doc_count": 0}
+                protocol = "https" if settings.OPENSEARCH_USE_SSL else "http"
                 return {
                     "status": "connected",
-                    "host": f"{settings.ELASTICSEARCH_HOST}:{settings.ELASTICSEARCH_PORT}",
+                    "host": f"{protocol}://{settings.OPENSEARCH_HOST}:{settings.OPENSEARCH_PORT}",
                     "indices": indices_info
                 }
             return {"status": "disconnected", "error": "Ping failed"}
@@ -142,10 +145,10 @@ class DatabaseManager:
             connections.disconnect(settings.MILVUS_ALIAS)
             self.milvus_connected = False
             logger.info("Disconnected from Milvus.")
-        if self.elasticsearch_connected and self.es_client:
-            self.es_client.close()
-            self.elasticsearch_connected = False
-            logger.info("Disconnected from Elasticsearch.")
+        if self.opensearch_connected and self.opensearch_client:
+            self.opensearch_client.close()
+            self.opensearch_connected = False
+            logger.info("Disconnected from OpenSearch.")
 
 # Tạo một instance duy nhất (singleton-like) để sử dụng trong toàn bộ ứng dụng
 db_manager = DatabaseManager()

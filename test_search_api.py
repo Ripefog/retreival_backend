@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test script for /search API endpoint of Video Retrieval Backend.
-Mocks database responses (Milvus & Elasticsearch) and missing BEiT3 checkpoint
+Mocks database responses (Milvus & OpenSearch) and missing BEiT3 checkpoint
 while executing real AI models (MetaCLIP 2) on GPU.
 """
 
@@ -76,13 +76,13 @@ def run_tests():
     # Patch connect_all and collection loaders before importing app
     db_manager.connect_all = AsyncMock(return_value=None)
     db_manager.connect_milvus = AsyncMock(return_value=None)
-    db_manager.connect_elasticsearch = AsyncMock(return_value=None)
+    db_manager.connect_opensearch = AsyncMock(return_value=None)
     db_manager._load_milvus_collections = AsyncMock(return_value=None)
     db_manager.milvus_connected = True
-    db_manager.elasticsearch_connected = True
+    db_manager.opensearch_connected = True
     db_manager.get_collection = MagicMock(return_value=MagicMock())
     db_manager.check_milvus_connection = MagicMock(return_value={"status": "connected"})
-    db_manager.check_elasticsearch_connection = MagicMock(return_value={"status": "connected"})
+    db_manager.check_opensearch_connection = MagicMock(return_value={"status": "connected"})
 
     from app.retrieval_engine import HybridRetriever
 

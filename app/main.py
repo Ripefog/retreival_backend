@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
 # Khởi tạo ứng dụng FastAPI với lifespan
 app = FastAPI(
     title="Hybrid Video Retrieval API",
-    description="Một API mạnh mẽ để tìm kiếm video đa phương thức, sử dụng MetaCLIP 2, BEiT-3, Co-DETR và cơ sở dữ liệu vector/text (Milvus, Elasticsearch).",
+    description="Một API mạnh mẽ để tìm kiếm video đa phương thức, sử dụng MetaCLIP 2, BEiT-3, Co-DETR và cơ sở dữ liệu vector/text (Milvus, OpenSearch).",
     version="1.1.0",
     lifespan=lifespan,
     contact={
@@ -146,7 +146,7 @@ async def health_check():
         raise HTTPException(status_code=503, detail="Retriever service is not available.")
 
     milvus_status = retriever.check_milvus_connection()
-    es_status = retriever.check_elasticsearch_connection()
+    opensearch_status = retriever.check_opensearch_connection()
 
     is_healthy = milvus_status.get("status") == "connected"
 
@@ -156,14 +156,14 @@ async def health_check():
             detail={
                 "status": "unhealthy",
                 "milvus": milvus_status,
-                "elasticsearch": es_status,
+                "opensearch": opensearch_status,
             }
         )
 
     return {
         "status": "healthy",
         "milvus": milvus_status,
-        "elasticsearch": es_status,
+        "opensearch": opensearch_status,
     }
 
 

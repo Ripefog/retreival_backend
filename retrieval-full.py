@@ -201,8 +201,8 @@ class Config_Retrieval:
     COLOR_COLLECTION = 'arch_color_name_v3'
     METADATA_INDEX = 'video_retrieval_metadata_v3'
 
-    OCR_INDEX = 'ocr'
-    ASR_INDEX = 'video_transcripts'
+    OCR_INDEX = 'video_ocr'
+    ASR_INDEX = 'video_asr'
 
 print("[✔] Configuration file loaded.")
 
@@ -496,14 +496,14 @@ class HybridRetriever:
             coll.load()
             print(f"[✔] Milvus collection '{name}' loaded.")
 
-        # 3. Kết nối tới Elasticsearch/OpenSearch
-        self.es_client = OpenSearch(
+        # 3. Kết nối tới OpenSearch
+        self.opensearch_client = OpenSearch(
             hosts=[{'host': config.OPENSEARCH_HOST, 'port': 443}],
             http_auth=(config.OPENSEARCH_USERNAME, config.OPENSEARCH_PASSWORD),
             use_ssl=True, verify_certs=True,
             ssl_assert_hostname=False, ssl_show_warn=False,
         )
-        if self.es_client.ping():
+        if self.opensearch_client.ping():
             print("[✔] Successfully connected to OpenSearch.")
         else:
             raise ConnectionError("Could not connect to OpenSearch.")
@@ -530,25 +530,27 @@ class HybridRetriever:
             })
         return hits
 
-    def _search_es(self, ocr_query: Optional[str], asr_query: Optional[str]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
+    def _search_opensearch(self, ocr_query: Optional[str], asr_query: Optional[str]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
         """Tìm kiếm trên OpenSearch để lấy ID cho việc lọc."""
         ocr_kf_ids, asr_video_ids = None, None
 
         if ocr_query:
             ocr_kf_ids = set()
-            query_body = {"query": {"match": {"text": ocr_query}}, "_source": ["keyframe_id"]}
+            query_body = {"query": {"match": {"ocr_text": ocr_query}}, "_source": ["frame_filename", "keyframe_id"]}
             try:
-                res = self.es_client.search(index=self.config.OCR_INDEX, body=query_body, size=10000)
+                res = self.opensearch_client.search(index=self.config.OCR_INDEX, body=query_body, size=10000)
                 for hit in res['hits']['hits']:
-                    ocr_kf_ids.add(hit['_source']['keyframe_id'])
+                    src = hit['_source']
+                    kf_id = src.get('frame_filename') or src.get('keyframe_id')
+                    if kf_id: ocr_kf_ids.add(kf_id)
             except NotFoundError:
                 print(f"Warning: OCR index '{self.config.OCR_INDEX}' not found.")
 
         if asr_query:
             asr_video_ids = set()
-            query_body = {"query": {"match": {"text": asr_query}}, "_source": ["video_id"]}
+            query_body = {"query": {"match": {"asr_text": asr_query}}, "_source": ["video_id"]}
             try:
-                res = self.es_client.search(index=self.config.ASR_INDEX, body=query_body, size=10000)
+                res = self.opensearch_client.search(index=self.config.ASR_INDEX, body=query_body, size=10000)
                 for hit in res['hits']['hits']:
                     asr_video_ids.add(hit['_source']['video_id'])
             except NotFoundError:
@@ -669,7 +671,7 @@ class HybridRetriever:
 
         # GIAI ĐOẠN 4: LỌC CỨNG (HARD FILTERING)
         print("4. Hard filtering with OpenSearch (OCR/ASR)...")
-        ocr_kf_ids, asr_video_ids = self._search_es(ocr_query, asr_query)
+        ocr_kf_ids, asr_video_ids = self._search_opensearch(ocr_query, asr_query)
         
         if ocr_kf_ids is not None or asr_video_ids is not None:
             final_candidates = {}
