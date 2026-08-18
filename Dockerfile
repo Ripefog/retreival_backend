@@ -33,21 +33,21 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Cài đặt PyTorch 2.0.1 (ổn định hơn)
-RUN pip install --no-cache-dir torch==2.0.1+cu118 torchvision==0.15.2+cu118 torchaudio==2.0.2+cu118 \
+# MetaCLIP 2 notebook baseline: PyTorch 2.1 with CUDA 11.8.
+RUN pip install --no-cache-dir torch==2.1.0+cu118 torchvision==0.16.0+cu118 torchaudio==2.1.0+cu118 \
     -f https://download.pytorch.org/whl/torch_stable.html
 
-# Cài đặt Gemini API và fix transformers compatibility
+# Cài đặt Gemini API và MetaCLIP 2 runtime
 RUN pip install -U langchain-google-genai && \
-    pip install --no-cache-dir "transformers==4.30.2" --force-reinstall
+    pip install --no-cache-dir "transformers==4.56.2" safetensors accelerate --force-reinstall
 
 # Tạo thư mục models
 RUN mkdir -p /app/models
 
-# Copy các model files
-COPY open_clip_pytorch_model.bin /app/models/clip_model.bin
-COPY beit3.spm /app/models/beit3.spm
-COPY beit3_base_patch16_384_coco_retrieval.pth /app/models/beit3_base_patch16_384_coco_retrieval.pth
+# Copy các model files. MetaCLIP 2 is downloaded by Transformers on first use
+# (or restored from a mounted Hugging Face cache).
+COPY models/beit3.spm /app/models/beit3.spm
+COPY models/beit3_base_patch16_384_coco_retrieval.pth /app/models/beit3_base_patch16_384_coco_retrieval.pth
 
 # --- Cài đặt BEiT-3 ---
 RUN git clone https://github.com/microsoft/unilm.git /app/unilm && \
@@ -69,7 +69,6 @@ RUN pip install --no-cache-dir --force-reinstall "numpy==1.24.4"
 # ==============================================================================
 # STAGE 3: Cấu hình và chạy ứng dụng
 # ==============================================================================
-COPY .env /app/.env
 # Copy application code
 COPY ./app /app/app
 

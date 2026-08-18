@@ -152,12 +152,29 @@ logs/
 back_up/
 data/
 model/
+models/
+keyframes/
+rerank_visualizations/
 temp/
 tmp/
-co_dino_5scale_swin_large_16e_o365tococo.pth
+*.whl
+*.ts
+*.pth
+*.pt
+*.spm
+*.bin
+*.onnx
+*.safetensors
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
 
 # Docker
 .dockerignore
 
 # ngrok
-ngrok.yml 
+ngrok.yml
+
+

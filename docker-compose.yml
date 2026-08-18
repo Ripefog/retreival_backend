@@ -8,8 +8,16 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      - MILVUS_URI=${MILVUS_URI:-}
+      - MILVUS_TOKEN=${MILVUS_TOKEN:-}
       - MILVUS_HOST=${MILVUS_HOST:-0.tcp.ap.ngrok.io}
       - MILVUS_PORT=${MILVUS_PORT:-13216}
+      - METACLIP2_COLLECTION=${METACLIP2_COLLECTION:-arch_metaclip2_image_v100}
+      - BEIT3_COLLECTION=${BEIT3_COLLECTION:-arch_beit3_image_v100}
+      - OBJECT_COLLECTION=${OBJECT_COLLECTION:-arch_metaclip2_object_name_v100}
+      - METACLIP2_MODEL_NAME=${METACLIP2_MODEL_NAME:-facebook/metaclip-2-worldwide-huge-quickgelu}
+      - METACLIP2_DIM=${METACLIP2_DIM:-1024}
+      - HF_CACHE_DIR=${HF_CACHE_DIR:-/app/models/huggingface}
       - ELASTICSEARCH_HOST=${ELASTICSEARCH_HOST:-0.tcp.ap.ngrok.io}
       - ELASTICSEARCH_PORT=${ELASTICSEARCH_PORT:-9200}
       - DEVICE=${DEVICE:-cpu}

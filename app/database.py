@@ -26,25 +26,18 @@ class DatabaseManager:
         await self.connect_elasticsearch()
 
         if not self.milvus_connected or not self.elasticsearch_connected:
-            raise RuntimeError("Failed to establish one or more database connections.")
-        
-        logger.info("✅ All database connections established successfully.")
+            logger.warning("⚠️ One or more databases unreachable. Server starting in standalone mode.")
+        else:
+            logger.info("✅ All database connections established successfully.")
 
     async def connect_milvus(self):
         """Thiết lập kết nối đến máy chủ Milvus."""
         connections.disconnect("default")
         try:
             params = settings.get_milvus_connection_params()
-            logger.info(f"Connecting to Milvus at {params['host']}:{params['port']} (User: {params.get('user', 'N/A')})...")
-            # logger.info(f"Connecting to Milvus at cloud")
-
-            connections.connect(
-                alias="default",
-                host=params['host'],
-                port=params['port'],
-                user="root",
-                password="aiostorm"
-            )
+            destination = params.get("uri") or f"{params['host']}:{params['port']}"
+            logger.info("Connecting to Milvus at %s...", destination)
+            connections.connect(**params)
 
             if connections.has_connection(settings.MILVUS_ALIAS):
                 self.milvus_connected = True
@@ -84,7 +77,7 @@ class DatabaseManager:
         logger.info("Loading Milvus collections...")
         try:
             collection_names = [
-                settings.CLIP_COLLECTION,
+                settings.METACLIP2_COLLECTION,
                 settings.BEIT3_COLLECTION,
                 settings.OBJECT_COLLECTION,
             ]
@@ -112,7 +105,7 @@ class DatabaseManager:
             if connections.has_connection(settings.MILVUS_ALIAS):
                 return {
                     "status": "connected",
-                    "host": f"{settings.MILVUS_HOST}:{settings.MILVUS_PORT}",
+                    "host": settings.MILVUS_URI or f"{settings.MILVUS_HOST}:{settings.MILVUS_PORT}",
                     "collections": {
                         name: {"num_entities": col.num_entities}
                         for name, col in self.collections.items()

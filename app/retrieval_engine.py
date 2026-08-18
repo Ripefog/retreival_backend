@@ -7,9 +7,12 @@ import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Set
 import numpy as np
 import torch
-
+import re
 # Performance optimization imports
 from scipy.optimize import linear_sum_assignment
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     import colorspacious
@@ -20,7 +23,6 @@ except ImportError:
     logging.warning("colorspacious not available, falling back to faster Euclidean distance")
 
 # Import từ các thư viện ML
-import open_clip
 import sentencepiece as spm
 from torchvision import transforms
 
@@ -40,11 +42,10 @@ except ImportError:
 
 from colormath.color_objects import sRGBColor, LabColor
 from colormath.color_conversions import convert_color
-from icecream import ic
-
 # Import từ các module của ứng dụng
 from .config import settings
 from .database import db_manager
+from .metaclip2 import MetaCLIP2Encoder
 import numpy as np
 from rapidfuzz import fuzz
 import statistics
@@ -65,12 +66,18 @@ logger = logging.getLogger(__name__)
 
 # --- Cấu hình cho BEiT-3 (lấy từ repo gốc) ---
 class BEiT3Config:
-    def __init__(self):
-        self.encoder_embed_dim = 768
-        self.encoder_attention_heads = 12
-        self.encoder_layers = 12
-        self.encoder_ffn_embed_dim = 3072
-        self.img_size = 384
+    def __init__(self, is_large: bool = False, img_size: int = 384):
+        if is_large:
+            self.encoder_embed_dim = 1024
+            self.encoder_attention_heads = 16
+            self.encoder_layers = 24
+            self.encoder_ffn_embed_dim = 4096
+        else:
+            self.encoder_embed_dim = 768
+            self.encoder_attention_heads = 12
+            self.encoder_layers = 12
+            self.encoder_ffn_embed_dim = 3072
+        self.img_size = img_size
         self.patch_size = 16
         self.in_chans = 3
         self.vocab_size = 64010
@@ -118,30 +125,56 @@ class HybridRetriever:
 
     def __init__(self):
         self.db_manager = db_manager
-        self.device = "cuda"
+        self.device = settings.DEVICE
         self.initialized = False
         # Placeholders for models and tokenizers
-        self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
+        self.metaclip2 = None
         self.beit3_model, self.beit3_preprocess, self.beit3_sp_model = None, None, None
         
         # Initialize Gemini LLM if available
         self.llm = None
-        ic(settings.GOOGLE_API_KEY)
-        ic(HAS_GEMINI)
-        if HAS_GEMINI and settings.GOOGLE_API_KEY:
+
+        api_key = (
+            os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+        )
+
+        print("HybridRetriever initialized with device:", self.device)
+        print("Gemini API key available:", bool(api_key))
+
+        if HAS_GEMINI and api_key:
             try:
-                self.llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.0-flash-exp",
-                    temperature=0.6,
-                    max_retries=2,
-                    google_api_key=settings.GOOGLE_API_KEY
+                logger.info(
+                    "Initializing Gemini 3.6 Flash for multi-query search..."
                 )
-                logger.info("✅ Gemini LLM initialized for multi-query search")
+
+                self.llm = ChatGoogleGenerativeAI(
+                    model="gemini-3.6-flash",
+                    max_retries=2,
+                    google_api_key=api_key,
+                )
+
+                logger.info(
+                    "✅ Gemini 3.6 Flash initialized for multi-query search"
+                )
+
             except Exception as e:
-                logger.warning(f"Failed to initialize Gemini LLM: {e}")
+                logger.warning(
+                    f"Failed to initialize Gemini LLM: {e}"
+                )
                 self.llm = None
+
         else:
-            logger.warning("Gemini LLM not available (missing API key or library)")
+            logger.warning(
+                "Gemini LLM not available "
+                "(missing API key or library)"
+            )
+
+    def check_milvus_connection(self) -> Dict[str, Any]:
+        return self.db_manager.check_milvus_connection()
+
+    def check_elasticsearch_connection(self) -> Dict[str, Any]:
+        return self.db_manager.check_elasticsearch_connection()
 
     async def initialize(self):
         """Khởi tạo retriever: kết nối DB và tải model một cách an toàn."""
@@ -149,9 +182,10 @@ class HybridRetriever:
             return
         logger.info("Initializing Hybrid Retriever engine...")
         if not self.db_manager.milvus_connected or not self.db_manager.elasticsearch_connected:
-            raise RuntimeError("Database connections must be established before initializing the retriever.")
+            logger.warning("⚠️ Database connections not established. Running in standalone model mode.")
         self._load_models()
-        await self.db_manager._load_milvus_collections()
+        if self.db_manager.milvus_connected:
+            await self.db_manager._load_milvus_collections()
         self.initialized = True
         logger.info("✅ Hybrid Retriever initialized successfully.")
 
@@ -165,46 +199,85 @@ class HybridRetriever:
         """Tải tất cả các mô hình AI cần thiết vào đúng device."""
         logger.info(f"Loading AI models onto device: '{self.device}'")
 
-        # 1. Tải CLIP
-        self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(
-            model_name='ViT-H-14', pretrained=settings.CLIP_MODEL_PATH if os.path.exists(settings.CLIP_MODEL_PATH) else "laion2b_s32b_b79k", device=self.device)
-        self.clip_model.eval()
-        self.clip_tokenizer = open_clip.get_tokenizer('ViT-H-14')
-        logger.info("  - CLIP model loaded.")
+        # 1. Load MetaCLIP 2. Its text vectors must match the MetaCLIP 2 Milvus collections.
+        self.metaclip2 = MetaCLIP2Encoder(
+            model_name=settings.METACLIP2_MODEL_NAME,
+            device=self.device,
+            expected_dim=settings.METACLIP2_DIM,
+            cache_dir=settings.HF_CACHE_DIR,
+        )
+        logger.info("  - MetaCLIP 2 model loaded.")
 
-        # 2. Tải BEiT-3
-        self.beit3_model = BEiT3ForRetrieval(BEiT3Config())
-        checkpoint = torch.load(settings.BEIT3_MODEL_PATH, map_location="cpu")
-        self.beit3_model.load_state_dict(checkpoint["model"])
-        self.beit3_model = self.beit3_model.to(self.device).eval()
-        self.beit3_sp_model = spm.SentencePieceProcessor()
-        self.beit3_sp_model.load(settings.BEIT3_SPM_PATH)
-        self.beit3_preprocess = transforms.Compose([
-            transforms.Resize((384, 384), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-        logger.info("  - BEiT-3 model loaded.")
+        # 2. Tải BEiT-3 (nếu file tồn tại)
+        if os.path.exists(settings.BEIT3_MODEL_PATH) and os.path.exists(settings.BEIT3_SPM_PATH):
+            checkpoint = torch.load(settings.BEIT3_MODEL_PATH, map_location="cpu")
+            state_dict = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))
+            
+            # Tự động nhận diện BEiT-3 Base hay Large và img_size (224 hoặc 384)
+            embed_dim = 768
+            img_size = 384
+            for key in ["beit3.text_embed.weight", "text_embed.weight"]:
+                if key in state_dict:
+                    embed_dim = state_dict[key].shape[1]
+                    break
+            is_large = (embed_dim == 1024) or any("encoder.layers.23" in k for k in state_dict.keys())
+            
+            # Check img_size based on position embeddings shape
+            for key in ["beit3.encoder.embed_positions.A.weight", "encoder.embed_positions.A.weight"]:
+                if key in state_dict:
+                    pos_len = state_dict[key].shape[0]
+                    if pos_len == 199:
+                        img_size = 224
+                    elif pos_len == 579:
+                        img_size = 384
+                    break
+
+            cfg = BEiT3Config(is_large=is_large, img_size=img_size)
+            self.beit3_model = BEiT3ForRetrieval(cfg)
+            self.beit3_model.load_state_dict(state_dict, strict=False)
+            self.beit3_model = self.beit3_model.to(self.device).eval()
+            self.beit3_sp_model = spm.SentencePieceProcessor()
+            self.beit3_sp_model.load(settings.BEIT3_SPM_PATH)
+            self.beit3_preprocess = transforms.Compose([
+                transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
+            logger.info(f"  - BEiT-3 ({'Large' if is_large else 'Base'}, {img_size}x{img_size}) model loaded successfully from {settings.BEIT3_MODEL_PATH}.")
+        else:
+            logger.warning(f"  - ⚠️ BEiT-3 model/spm files not found at '{settings.BEIT3_MODEL_PATH}'. BEiT-3 retrieval will be disabled.")
 
     # --- CÁC HÀM MÃ HÓA (EMBEDDING) ---
-    def get_clip_text_embedding(self, text: str) -> np.ndarray:
-        with torch.no_grad():
-            tokens = self.clip_tokenizer([text]).to(self.device)
-            text_emb = self.clip_model.encode_text(tokens).cpu().numpy()[0]
-            return text_emb / np.linalg.norm(text_emb, axis=0)
+    def get_metaclip2_text_embedding(self, text: str) -> np.ndarray:
+        if self.metaclip2 is None:
+            raise RuntimeError("MetaCLIP 2 is not initialized.")
+        return self.metaclip2.encode_text(text)
 
     def get_beit3_text_embedding(self, text: str) -> np.ndarray:
-        with torch.no_grad():
-            text_ids = self.beit3_sp_model.encode_as_ids(text)
-            text_padding_mask = [0] * len(text_ids)
-            text_ids_tensor = torch.tensor(text_ids, dtype=torch.long).unsqueeze(0).to(self.device)
-            text_padding_mask_tensor = torch.tensor(text_padding_mask, dtype=torch.long).unsqueeze(0).to(self.device)
-            _, text_emb = self.beit3_model(
-                text_description=text_ids_tensor,
-                text_padding_mask=text_padding_mask_tensor,
-                only_infer=True
-            )
-            return text_emb.cpu().numpy()[0]
+        embed_dim = 1024 if (self.beit3_model is not None and getattr(self.beit3_model, 'text_embed', None) is not None and self.beit3_model.text_embed.weight.shape[1] == 1024) else 768
+        if self.beit3_model is None or self.beit3_sp_model is None:
+            logger.warning("BEiT-3 model or SPM is not loaded. Returning zero embedding.")
+            return np.zeros(embed_dim, dtype=np.float32)
+        try:
+            with torch.no_grad():
+                text_ids = self.beit3_sp_model.encode_as_ids(text)
+                # BEiT-3 BOS (0) và EOS (2) tokens với giới hạn 64 BPE tokens
+                text_ids = [0] + text_ids[:62] + [2]
+                vocab_limit = getattr(BEiT3Config(), "vocab_size", 64010)
+                text_ids = [t if 0 <= t < vocab_limit else 3 for t in text_ids]
+
+                text_padding_mask = [0] * len(text_ids)
+                text_ids_tensor = torch.tensor(text_ids, dtype=torch.long).unsqueeze(0).to(self.device)
+                text_padding_mask_tensor = torch.tensor(text_padding_mask, dtype=torch.long).unsqueeze(0).to(self.device)
+                _, text_emb = self.beit3_model(
+                    text_description=text_ids_tensor,
+                    text_padding_mask=text_padding_mask_tensor,
+                    only_infer=True
+                )
+                return text_emb.cpu().numpy()[0]
+        except Exception as e:
+            logger.warning(f"Error computing BEiT-3 text embedding ({e}). Returning zero vector.")
+            return np.zeros(embed_dim, dtype=np.float32)
 
     def _vectorized_color_distances(self, colors1: List[Tuple[float, float, float]],
                                     colors2: List[Tuple[float, float, float]]) -> np.ndarray:
@@ -279,11 +352,19 @@ class HybridRetriever:
         kf_id = f"{video_id}_{timestamp}.jpg"
         return video_id, kf_id
 
-    def _split_csv_ints(self, s: Optional[str]) -> List[int]:
+    def _split_csv_ints(self, s: Any) -> List[int]:
+        if not s: return []
+        if isinstance(s, (list, tuple)):
+            out = []
+            for item in s:
+                try: out.append(int(item))
+                except (ValueError, TypeError): pass
+            return out
+        s = str(s).strip("[](){}\"' ")
         if not s: return []
         out = []
         for p in s.split(","):
-            p = p.strip()
+            p = p.strip("[](){}\"' ")
             if not p: continue
             try:
                 out.append(int(p))
@@ -292,12 +373,20 @@ class HybridRetriever:
                 except ValueError: pass
         return out
 
-    def _split_csv_floats(self, s: Optional[str]) -> List[float]:
+    def _split_csv_floats(self, s: Any) -> List[float]:
+        if not s: return []
+        if isinstance(s, (list, tuple)):
+            out = []
+            for item in s:
+                try: out.append(float(item))
+                except (ValueError, TypeError): pass
+            return out
+        s = str(s).strip("[](){}\"' ")
         if not s: return []
         out = []
         for p in s.split(","):
-            p = p.strip()
-            if p == "": continue
+            p = p.strip("[](){}\"' ")
+            if not p: continue
             try: out.append(float(p))
             except ValueError: pass
         return out
@@ -314,6 +403,68 @@ class HybridRetriever:
         return lab6
 
     # --- LOGIC TÌM KIẾM CHÍNH ---
+    @staticmethod
+    def _extract_llm_text_content(content: Any) -> str:
+        """Normalize LangChain/Gemini content into plain text."""
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, str):
+                    text = part
+                elif isinstance(part, dict):
+                    text = part.get("text", "")
+                else:
+                    text = getattr(part, "text", "")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+            return "\n".join(text_parts)
+
+        return str(content) if content is not None else ""
+
+    @staticmethod
+    def _contains_vietnamese_characters(text: str) -> bool:
+        """Detect Vietnamese diacritics without adding a language-detection dependency."""
+        return bool(re.search(
+            r"[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩ"
+            r"òóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
+            r"ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨ"
+            r"ÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]",
+            text,
+        ))
+
+    def _translate_vietnamese_query(self, text_query: str) -> str:
+        """Translate accented Vietnamese retrieval queries to English when Gemini is available."""
+        if not self._contains_vietnamese_characters(text_query):
+            return text_query
+
+        if not self.llm:
+            logger.warning("Vietnamese query detected but Gemini is unavailable; using original query")
+            return text_query
+
+        prompt = f"""Translate the Vietnamese video-retrieval query below into natural, concise English.
+Preserve every visual constraint: objects, counts, actions, colors, attributes, and relationships.
+Return only the English translation, without quotation marks, labels, or explanation.
+
+Vietnamese query:
+{text_query}"""
+
+        try:
+            response = self.llm.invoke(prompt)
+            translated_query = self._extract_llm_text_content(
+                getattr(response, "content", None)
+            ).strip().strip("\"'")
+            if translated_query:
+                logger.info("Translated Vietnamese text query to English before retrieval")
+                return translated_query
+        except Exception as exc:
+            logger.warning(f"Failed to translate Vietnamese query: {exc}")
+
+        logger.warning("Vietnamese query translation returned no text; using original query")
+        return text_query
+
     async def search(self, text_query: str, mode: str, user_query: str, object_filters: Optional[Dict],
                      color_filters: Optional[List], ocr_query: Optional[str], asr_query: Optional[str],
                      top_k: int, num_query: int = 1) -> List[Dict[str, Any]]:
@@ -327,12 +478,17 @@ class HybridRetriever:
             raise RuntimeError("Retriever is not initialized.")
 
         start_time = time.time()
+        text_query = self._translate_vietnamese_query(text_query)
+        
         
         if num_query > 1:
             logger.info(f"Using multi-query search with {num_query} total queries")
             
             # Sinh ra các query tương tự
             enhanced_queries = self._generate_enhanced_queries(text_query, num_query)
+            
+            print(enhanced_queries )
+            logger.debug(f"Enhanced queries: {enhanced_queries}")
             
             # Tìm kiếm với nhiều query
             all_candidates = await self._search_with_multiple_queries(
@@ -341,7 +497,11 @@ class HybridRetriever:
             )
             
             # Tổng hợp kết quả
-            final_results = self._aggregate_multi_query_results(all_candidates, top_k)
+            final_results = self._aggregate_multi_query_results(
+                all_candidates,
+                top_k,
+                num_queries=len(enhanced_queries),
+            )
             
         else:
             logger.info("Using single query search")
@@ -385,18 +545,37 @@ class HybridRetriever:
                 }
 
     def build_expr(self, expr: Optional[str] = None, user_query: str = "") -> Optional[str]:
-        user_list = [
-            "Gia Nguyên, Duy Bảo", "Gia Nguyên, Duy Khương", "Gia Nguyên, Minh Tâm", "Gia Nguyên, Lê Hiếu",
-            "Duy Bảo, Duy Khương", "Duy Bảo, Minh Tâm", "Duy Bảo, Lê Hiếu",
-            "Duy Khương, Minh Tâm", "Duy Khương, Lê Hiếu", "Minh Tâm, Lê Hiếu"
-        ]
+        """
+        Xây dựng biểu thức lọc theo user gán nhãn cho Milvus DB.
+        Danh sách 5 gán nhãn viên chính thức: "Văn Huấn", "Minh Trí", "Ngọc Minh", "Văn Nam", "Duy Khương".
+        """
+        OFFICIAL_USERS = {
+            # 5 Tên gán nhãn viên chính thức trong CSDL Milvus
+            "Văn Huấn": "Văn Huấn",
+            "Minh Trí": "Minh Trí",
+            "Ngọc Minh": "Ngọc Minh",
+            "Văn Nam": "Văn Nam",
+            "Duy Khương": "Duy Khương",
+            # Hỗ trợ tên gọi tắt
+            "Huấn": "Văn Huấn",
+            "Trí": "Minh Trí",
+            "Minh": "Ngọc Minh",
+            "Nam": "Văn Nam",
+            "Khương": "Duy Khương",
+            # Hỗ trợ tương thích ngược cho tên alias cũ nếu FE gửi lên
+            "Gia Nguyên": "Văn Huấn",
+            "Duy Bảo": "Văn Nam",
+            "Minh Tâm": "Minh Trí",
+            "Lê Hiếu": "Ngọc Minh",
+        }
         if user_query:
-            filtered_users = [u for u in user_list if user_query in u]
-            if filtered_users:
-                user_expr = f'user in {filtered_users}'
-                if expr: expr = f'({expr}) && ({user_expr})'
-                else: expr = user_expr
-            # return expr
+            raw_user = user_query.strip()
+            db_name = OFFICIAL_USERS.get(raw_user, raw_user)
+            user_expr = f'user LIKE "%{db_name}%"'
+            if expr:
+                expr = f'({expr}) && ({user_expr})'
+            else:
+                expr = user_expr
         return expr
 
     async def _search_milvus(self, collection_name: str, vector: List[float], top_k: int,
@@ -404,7 +583,7 @@ class HybridRetriever:
         collection = self.db_manager.get_collection(collection_name)
         if not collection: return []
 
-        if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
+        if collection_name in (settings.METACLIP2_COLLECTION, settings.BEIT3_COLLECTION):
             output_fields = ["keyframe_id", "timestamp", "object_ids", "lab_colors", "user"]
         elif collection_name == settings.OBJECT_COLLECTION:
             output_fields = ["object_id", "bbox_xyxy", "color_lab"]
@@ -439,7 +618,7 @@ class HybridRetriever:
         hits = []
         for hit in search_results:
             hit_data = hit.entity.to_dict()["entity"]
-            if collection_name in (settings.CLIP_COLLECTION, settings.BEIT3_COLLECTION):
+            if collection_name in (settings.METACLIP2_COLLECTION, settings.BEIT3_COLLECTION):
                 raw_kf = hit_data.get("keyframe_id", "")
                 kf_clean = raw_kf[:raw_kf.lower().find(".jpg") + 4] if isinstance(raw_kf, str) and ".jpg" in raw_kf.lower() else raw_kf
                 vid, kf_normalized = self._parse_video_id_from_kf(kf_clean)
@@ -449,6 +628,9 @@ class HybridRetriever:
         return hits
 
     async def _async_hybrid_reranking(self, candidate_info: Dict[str, Dict], text_query: str):
+        if self.beit3_model is None or self.beit3_sp_model is None:
+            logger.warning("BEiT-3 model is unavailable. Skipping BEiT-3 hybrid reranking.")
+            return
         beit3_collection = self.db_manager.get_collection(settings.BEIT3_COLLECTION)
         if not beit3_collection:
             logger.warning("BEIT-3 collection not available for reranking")
@@ -484,7 +666,7 @@ class HybridRetriever:
                     dist = distances[i]
                     beit3_score = 1.0 / (1.0 + dist)
                     info = candidate_info[kf_id]
-                    info['score'] = (0.4 * info.get('clip_score', 0)) + (0.6 * beit3_score)
+                    info['score'] = (0.6 * info.get('metaclip2_score', 0)) + (0.4 * beit3_score)
                     info['beit3_score'] = beit3_score
                     info['reasons'].append(f"BEIT-3 refine ({beit3_score:.3f})")
             
@@ -518,13 +700,15 @@ class HybridRetriever:
     ):
         """OPTIMIZED & MERGED: Hỗ trợ cả logic 'count-aware' và logic 'instance-matching'."""
 
-        # ===== OBJECT FILTERS =====
+        # ===== OBJECT FILTERS (HARD FILTERING) =====
         if object_filters:
-            # Sử dụng hàm normalize mạnh mẽ từ code cũ
             norm_object_filters = self._normalize_object_filters(object_filters)
 
             for obj_label, filter_spec in norm_object_filters.items():
-                obj_vector = self.get_clip_text_embedding(obj_label).tolist()
+                if not candidate_info:
+                    break
+
+                obj_vector = self.get_metaclip2_text_embedding(obj_label).tolist()
 
                 all_object_ids = []
                 candidate_objects = {}
@@ -535,40 +719,36 @@ class HybridRetriever:
                         all_object_ids.extend(obj_ids)
 
                 if not all_object_ids:
-                    continue
+                    # Không có keyframe nào chứa object -> Xóa tất cả ứng viên (Lọc cứng)
+                    candidate_info.clear()
+                    break
 
                 batch_results = await self._batch_search_milvus_objects(all_object_ids, obj_vector)
 
-                for kf_id, obj_ids in candidate_objects.items():
+                for kf_id in list(candidate_info.keys()):
+                    obj_ids = candidate_objects.get(kf_id, [])
                     obj_hits = [batch_results[obj_id] for obj_id in obj_ids if obj_id in batch_results]
-                    if not obj_hits:
-                        continue
-                        
-                    # Phân nhánh logic dựa trên loại bộ lọc
+                    detected_count = len(obj_hits)
+
+                    # Phân nhánh kiểm tra tính hợp lệ (Hard Filtering)
                     if filter_spec.get('type') == 'count_aware':
-                        detected_count = len(obj_hits)
                         required_count = filter_spec.get('count')
-                        
-                        # Logic phạt nếu không khớp số lượng
-                        if not self._validate_count_constraint(detected_count, required_count):
-                            penalty = -0.5
-                            candidate_info[kf_id]["score"] += penalty
-                            candidate_info[kf_id].setdefault("reasons", []).append(
-                                f"Count penalty: '{obj_label}' {penalty:.3f} (Count: {detected_count}, req: {required_count})"
-                            )
-                            continue 
-                        
-                        # Logic tính điểm thưởng nếu khớp
-                        boost = self._calculate_count_aware_score(obj_hits, filter_spec, obj_label)
+                        is_valid = self._validate_count_constraint(detected_count, required_count)
                         reason_detail = f"Count: {detected_count}"
                         if required_count is not None:
                             reason_detail += f" (req: {required_count})"
-                    else: # Legacy/Instance-matching logic
-                        boost = self._calculate_legacy_object_score(obj_hits, filter_spec, obj_label)
-                        reason_detail = f"Legacy match"
+                        boost = self._calculate_count_aware_score(obj_hits, filter_spec, obj_label) if is_valid else 0.0
+                    else: # Legacy/Instance-matching logic (yêu cầu ít nhất 1 object)
+                        is_valid = (detected_count >= 1)
+                        reason_detail = f"Legacy match ({detected_count} found)"
+                        boost = self._calculate_legacy_object_score(obj_hits, filter_spec, obj_label) if is_valid else 0.0
 
-                    if boost > 0:
-                        candidate_info[kf_id]["score"] += boost
+                    if not is_valid:
+                        # LỌC CỨNG: Xóa hoàn toàn keyframe khỏi danh sách ứng viên
+                        del candidate_info[kf_id]
+                    else:
+                        if boost > 0:
+                            candidate_info[kf_id]["score"] += boost
                         candidate_info[kf_id].setdefault("reasons", []).append(
                             f"Object match: '{obj_label}' +{boost:.3f} ({reason_detail})"
                         )
@@ -885,86 +1065,491 @@ class HybridRetriever:
                 matched_count += 1
         #logger.info(f"ASR filter: {matched_count}/{len(candidate_info)} candidates boosted")
 
-    def _generate_enhanced_queries(self, original_query: str, num_query: int = 1) -> List[str]:
-        """
-        Sử dụng Gemini để sinh ra num_query câu query từ câu gốc.
+#     def _generate_enhanced_queries(self, original_query: str, num_query: int = 1) -> List[str]:
+#         """
+#         Sử dụng Gemini để sinh ra num_query câu query từ câu gốc.
         
-        Args:
-            original_query: Câu query gốc
-            num_query: Tổng số câu query cần có (bao gồm cả câu gốc)
+#         Args:
+#             original_query: Câu query gốc
+#             num_query: Tổng số câu query cần có (bao gồm cả câu gốc)
             
-        Returns:
-            List[str]: Danh sách num_query câu query (câu đầu tiên là câu gốc)
+#         Returns:
+#             List[str]: Danh sách num_query câu query (câu đầu tiên là câu gốc)
+#         """
+#         if num_query <= 1:
+#             return [original_query]
+            
+#         if not self.llm:
+#             logger.warning("Gemini LLM not available, falling back to single query")
+#             return [original_query]
+            
+#         n_additional = num_query - 1  # Số câu cần sinh thêm
+        
+#         try:
+#             prompt = f"""
+# Bạn là bộ sinh truy vấn cho hệ thống retrieval.
+# Nhiệm vụ: Từ PROMPT_GỐC dưới đây, hãy tạo ra {n_additional} biến thể diễn đạt khác nhau nhưng giữ nguyên ý nghĩa và ràng buộc.
+
+# YÊU CẦU:
+# - Không thêm/bớt thông tin hay giả định mới; giữ nguyên thực thể, số liệu, phạm vi thời gian.
+# - Đa dạng cấu trúc cách mô tả nhưng không thay đổi ý.
+# - Tránh trùng lặp: mỗi biến thể phải khác nhau rõ rệt.
+# - Ngôn ngữ: output tiếng anh (dù prompt gốc query vào có là tiếng việt hay tiếng anh).
+# - Chỉ trả về danh sách như bên dưới, không thêm câu dẫn dạng "Here's a list of query variations based on the original prompt:": 
+# 1. Query gốc (ở dạng tiếng anh)
+# 2. Biến thể 1
+# 3. Biến thể 2
+# ...
+
+# Câu query gốc là: "{original_query}"
+# """
+
+#             response = self.llm.invoke(prompt)
+#             logger.info(response)
+#             generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
+            
+#             # Lọc bỏ câu trùng lặp và đảm bảo khác nhau
+#             unique_queries = []
+#             seen_queries = set()
+            
+#             for query in generated_queries:
+#                 # Normalize để so sánh
+#                 normalized = ' '.join(sorted(query.lower().split()))
+#                 if normalized not in seen_queries:
+#                     unique_queries.append(query)
+#                     seen_queries.add(normalized)
+            
+#             # Nếu không đủ câu unique, thêm biến thể
+#             while len(unique_queries) < n_additional:
+#                 fallback_query = f"image showing {original_query}"
+#                 if fallback_query not in unique_queries:
+#                     unique_queries.append(fallback_query)
+#                 else:
+#                     unique_queries.append(f"visual of {original_query}")
+#                     break
+            
+#             # Giới hạn số câu
+#             if len(unique_queries) > n_additional:
+#                 unique_queries = unique_queries[:n_additional]
+            
+#             # Đã kết hợp câu gốc với các câu được sinh ra
+#             final_queries = unique_queries
+            
+#             logger.info(f"Generated {len(final_queries)} total queries from: '{original_query}'")
+#             for i, query in enumerate(final_queries):
+#                 logger.info(f"  Query {i+1}: '{query}'")
+                
+#             return final_queries
+            
+#         except Exception as e:
+#             logger.error(f"Failed to generate enhanced queries with Gemini: {e}")
+#             # Fallback: trả về câu gốc
+#             return [original_query]
+
+
+    def _generate_enhanced_queries(
+        self,
+        original_query: str,
+        num_query: int = 1
+    ) -> List[str]:
         """
+        Generate diverse visual retrieval queries for Video Event Retrieval.
+
+        The original query is always preserved as Q0.
+        Gemini only generates additional queries (Q1...Qn).
+
+        Args:
+            original_query:
+                Original user query.
+
+            num_query:
+                Total number of queries, including the original query.
+
+                Example:
+                    num_query=5
+                    -> Q0 = original query
+                    -> Q1-Q4 = Gemini generated queries
+
+        Returns:
+            List[str]:
+                [original_query, generated_query_1, ...]
+        """
+
+        # =========================================================
+        # 1. Basic validation
+        # =========================================================
+
+        original_query = original_query.strip()
+
+        if not original_query:
+            return []
+
         if num_query <= 1:
             return [original_query]
-            
+
+        # =========================================================
+        # 2. Gemini unavailable
+        # =========================================================
+
         if not self.llm:
-            logger.warning("Gemini LLM not available, falling back to single query")
+            logger.warning(
+                "Gemini LLM not available, "
+                "falling back to original query"
+            )
             return [original_query]
-            
-        n_additional = num_query - 1  # Số câu cần sinh thêm
-        
+
+        # Number of additional queries
+        n_additional = num_query - 1
+
+        # =========================================================
+        # 3. Prompt
+        # =========================================================
+
+        prompt = f"""
+    You are a query expansion module for a Video Event Retrieval (VER) system.
+
+    Your task is to generate exactly {n_additional} NEW visual retrieval queries
+    from the ORIGINAL USER QUERY below.
+
+    The generated queries will be encoded independently by vision-language
+    models such as MetaCLIP2 or BEiT-3 and used to retrieve relevant video frames.
+
+    The goal is to improve retrieval recall by describing the SAME visual event
+    from different visual perspectives.
+
+    ==================================================
+    CORE OBJECTIVE
+    ==================================================
+
+    Do NOT simply paraphrase the original sentence.
+
+    Generate visually diverse descriptions that preserve the same event,
+    objects, actions, attributes, relationships, and scene constraints.
+
+    Each query should be suitable as a natural image/video retrieval caption.
+
+    ==================================================
+    STRICT SEMANTIC PRESERVATION
+    ==================================================
+
+    Every generated query MUST preserve all important information from
+    the original query.
+
+    DO NOT:
+
+    - add objects, people, actions, attributes, colors, locations, or events
+    - remove important information
+    - change the number of objects or people
+    - change object identities
+    - change actions
+    - change colors
+    - change clothing or appearance
+    - change spatial relationships
+    - change temporal constraints
+    - invent details
+    - make assumptions not explicitly stated
+
+    For example:
+
+    "three cyclists" must remain three cyclists.
+
+    "white jersey" must remain a white jersey.
+
+    "red helmet" must remain a red helmet.
+
+    Do not replace specific attributes with vague concepts.
+
+    ==================================================
+    VISUAL RETRIEVAL OPTIMIZATION
+    ==================================================
+
+    Prioritize visually observable information:
+
+    - people
+    - objects
+    - object categories
+    - actions
+    - interactions
+    - colors
+    - clothing
+    - distinctive visual attributes
+    - spatial arrangement
+    - relative positions
+    - scene composition
+    - camera viewpoint
+    - camera angle
+    - explicitly mentioned environment
+
+    Avoid abstract explanations, motivations, intentions,
+    or reasoning that cannot be directly observed in a video frame.
+
+    Prefer concise, visually dense descriptions.
+
+    ==================================================
+    QUERY DIVERSITY
+    ==================================================
+
+    Generate different queries by changing the visual emphasis.
+
+    Use a suitable mixture of these perspectives:
+
+    1. GLOBAL / ORIGINAL
+    Describe the complete visual event.
+
+    2. COMPOSITION-FOCUSED
+    Emphasize number of entities, formation, spatial arrangement,
+    relative positions, or scene composition.
+
+    3. APPEARANCE-FOCUSED
+    Emphasize colors, clothing, visual attributes,
+    object appearance, or distinctive characteristics.
+
+    4. ACTION-FOCUSED
+    Emphasize the main visible action or interaction.
+
+    5. CAMERA / VIEWPOINT-FOCUSED
+    Emphasize explicitly stated viewpoints such as overhead,
+    aerial, frontal, side view, high-angle, or tracking view.
+
+    6. SCENE-FOCUSED
+    Describe the complete scene as a natural video caption.
+
+    7. OBJECT-FOCUSED
+    Emphasize the important people or objects.
+
+    8. RELATIONSHIP-FOCUSED
+    Emphasize explicitly stated spatial or interaction relationships.
+
+    Do not force every perspective.
+    Choose the most useful perspectives for the given query.
+
+    ==================================================
+    EMBEDDING-FRIENDLY STYLE
+    ==================================================
+
+    Queries should be concise and visually dense.
+
+    GOOD:
+
+    "Three cyclists riding in a straight line during a bicycle race,
+    wearing white jerseys and yellow-blue shorts."
+
+    BAD:
+
+    "The video appears to show a situation in which
+    three cyclists may possibly be participating in a race."
+
+    Avoid unnecessary words such as:
+
+    "image"
+    "picture"
+    "video"
+    "frame"
+
+    unless they naturally improve the visual description.
+
+    ==================================================
+    LANGUAGE
+    ==================================================
+
+    All generated queries MUST be in English.
+
+    If the original query is Vietnamese:
+
+    1. Understand its meaning.
+    2. Preserve all visual constraints.
+    3. Generate natural English visual retrieval queries.
+
+    ==================================================
+    IMPORTANT
+    ==================================================
+
+    The ORIGINAL QUERY itself must NOT be returned.
+
+    Generate exactly {n_additional} NEW queries.
+
+    Each generated query must be meaningfully different from the others.
+
+    Do not merely replace individual words with synonyms.
+
+    ==================================================
+    OUTPUT FORMAT
+    ==================================================
+
+    Return ONLY the generated queries.
+
+    One query per line.
+
+    Do NOT include:
+
+    - numbering
+    - bullet points
+    - labels such as "Q1"
+    - quotation marks
+    - explanations
+    - comments
+    - introductory text
+    - concluding text
+
+    ==================================================
+    ORIGINAL USER QUERY
+    ==================================================
+
+    {original_query}
+    """
+
+        # =========================================================
+        # 4. Call Gemini
+        # =========================================================
+
         try:
-            prompt = f"""
-Bạn là bộ sinh truy vấn cho hệ thống retrieval.
-Nhiệm vụ: Từ PROMPT_GỐC dưới đây, hãy tạo ra {n_additional} biến thể diễn đạt khác nhau nhưng giữ nguyên ý nghĩa và ràng buộc.
-
-YÊU CẦU:
-- Không thêm/bớt thông tin hay giả định mới; giữ nguyên thực thể, số liệu, phạm vi thời gian.
-- Đa dạng cấu trúc cách mô tả nhưng không thay đổi ý.
-- Tránh trùng lặp: mỗi biến thể phải khác nhau rõ rệt.
-- Ngôn ngữ: output tiếng anh (dù prompt gốc query vào có là tiếng việt hay tiếng anh).
-- Chỉ trả về danh sách như bên dưới, không thêm câu dẫn dạng "Here's a list of query variations based on the original prompt:": 
-1. Query gốc (ở dạng tiếng anh)
-2. Biến thể 1
-3. Biến thể 2
-...
-
-Câu query gốc là: "{original_query}"
-"""
-
             response = self.llm.invoke(prompt)
-            logger.info(response)
-            generated_queries = [line.strip() for line in response.content.strip().split('\n') if line.strip()]
-            
-            # Lọc bỏ câu trùng lặp và đảm bảo khác nhau
-            unique_queries = []
-            seen_queries = set()
-            
-            for query in generated_queries:
-                # Normalize để so sánh
-                normalized = ' '.join(sorted(query.lower().split()))
-                if normalized not in seen_queries:
-                    unique_queries.append(query)
-                    seen_queries.add(normalized)
-            
-            # Nếu không đủ câu unique, thêm biến thể
-            while len(unique_queries) < n_additional:
-                fallback_query = f"image showing {original_query}"
-                if fallback_query not in unique_queries:
-                    unique_queries.append(fallback_query)
-                else:
-                    unique_queries.append(f"visual of {original_query}")
-                    break
-            
-            # Giới hạn số câu
-            if len(unique_queries) > n_additional:
-                unique_queries = unique_queries[:n_additional]
-            
-            # Đã kết hợp câu gốc với các câu được sinh ra
-            final_queries = unique_queries
-            
-            logger.info(f"Generated {len(final_queries)} total queries from: '{original_query}'")
-            for i, query in enumerate(final_queries):
-                logger.info(f"  Query {i+1}: '{query}'")
-                
-            return final_queries
-            
+
+            if not response or not response.content:
+                logger.warning(
+                    "Gemini returned empty response"
+                )
+                return [original_query]
+
+            raw_response = self._extract_llm_text_content(response.content)
+
+            if not raw_response.strip():
+                logger.warning("Gemini response contained no text")
+                return [original_query]
+
+            logger.debug(
+                f"Gemini multi-query raw response:\n{raw_response}"
+            )
+
         except Exception as e:
-            logger.error(f"Failed to generate enhanced queries with Gemini: {e}")
-            # Fallback: trả về câu gốc
+            logger.warning(
+                f"Failed to generate enhanced queries: {e}"
+            )
             return [original_query]
+
+        # =========================================================
+        # 5. Parse generated queries
+        # =========================================================
+
+        generated_queries = []
+
+        for line in raw_response.splitlines():
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            # -----------------------------------------------------
+            # Remove common numbering/bullet formats
+            # -----------------------------------------------------
+            line = re.sub(
+                r"^\s*(?:[-*•]|\d+[\.\):\-])\s*",
+                "",
+                line
+            ).strip()
+
+            # -----------------------------------------------------
+            # Remove quotation marks
+            # -----------------------------------------------------
+            line = line.strip("\"'")
+
+            # -----------------------------------------------------
+            # Ignore accidental labels
+            # -----------------------------------------------------
+            if not line:
+                continue
+
+            generated_queries.append(line)
+
+        # =========================================================
+        # 6. Remove duplicates
+        # =========================================================
+
+        def normalize_query(text: str) -> str:
+            """
+            Normalize only for duplicate detection.
+            Do not reorder words because word order can
+            provide useful embedding diversity.
+            """
+            text = text.lower().strip()
+
+            # Normalize whitespace
+            text = re.sub(r"\s+", " ", text)
+
+            # Remove surrounding punctuation
+            text = text.strip(".,!?;:")
+
+            return text
+
+        seen_queries = {
+            normalize_query(original_query)
+        }
+
+        unique_queries = []
+
+        for query in generated_queries:
+
+            normalized = normalize_query(query)
+
+            if not normalized:
+                continue
+
+            # Exact normalized duplicate
+            if normalized in seen_queries:
+                continue
+
+            seen_queries.add(normalized)
+            unique_queries.append(query)
+
+        # =========================================================
+        # 7. Limit number of generated queries
+        # =========================================================
+
+        unique_queries = unique_queries[:n_additional]
+
+        # =========================================================
+        # 8. Fallback if Gemini generated too few queries
+        # =========================================================
+
+        if len(unique_queries) < n_additional:
+
+            logger.warning(
+                f"Gemini generated only "
+                f"{len(unique_queries)}/{n_additional} "
+                f"unique queries"
+            )
+
+        # Do NOT create artificial queries such as:
+        #
+        # "image showing ..."
+        #
+        # because these often reduce visual retrieval quality.
+        #
+        # Instead, simply return the queries Gemini generated.
+        #
+        # The retrieval system can work with fewer queries.
+
+        # =========================================================
+        # 9. Final query list
+        # =========================================================
+
+        final_queries = [
+            original_query
+        ] + unique_queries
+
+        logger.info(
+            f"Generated {len(final_queries)} total queries "
+            f"from original query"
+        )
+
+        for i, query in enumerate(final_queries):
+            logger.info(
+                f"  Q{i}: {query}"
+            )
+
+        return final_queries
+
 
     async def _search_with_multiple_queries(self, queries: List[str], mode: str, user_query: str, 
                                           object_filters: Optional[Dict], color_filters: Optional[List],
@@ -997,13 +1582,19 @@ Câu query gốc là: "{original_query}"
                             'keyframe_id': kf_id,
                             'video_id': result['video_id'],
                             'timestamp': result['timestamp'],
-                            'scores': [],
+                            #'scores': [],
+                            "query_scores": {},
                             'all_reasons': [],
                             'metadata': result['metadata']
                         }
                     
-                    all_candidates[kf_id]['scores'].append(result['score'])
-                    all_candidates[kf_id]['all_reasons'].extend([f"Q{i+1}: {reason}" for reason in result['reasons']])
+                    # all_candidates[kf_id]['scores'].append(result['score'])
+                    # all_candidates[kf_id]['all_reasons'].extend([f"Q{i+1}: {reason}" for reason in result['reasons']])
+                    
+                    all_candidates[kf_id]["query_scores"][i] = result["score"]
+                    all_candidates[kf_id]["all_reasons"].extend(
+                        result.get("reasons", [])
+                    )
                     
             except Exception as e:
                 print(np.__version__)
@@ -1020,17 +1611,26 @@ Câu query gốc là: "{original_query}"
         Thực hiện tìm kiếm với một query duy nhất (logic gốc).
         """
         candidate_info: Dict[str, Dict[str, Any]] = {}
+
+        print(text_query)
         
-        # BƯỚC 1: LẤY ỨNG VIÊN BAN ĐẦU
+        # BƯỚC 1: LẤY ỨNG VIÊN BAN ĐẦU (mở rộng pool để lọc cứng hiệu quả)
+        initial_k = max(top_k * 10, 200)
         tasks = []
-        if mode in ['hybrid', 'clip']:
-            clip_vector = self.get_clip_text_embedding(text_query).tolist()
-            tasks.append(self._search_milvus_async(settings.CLIP_COLLECTION, clip_vector,
-                                                   top_k, None, user_query, 'clip'))
+        if mode in ['hybrid', 'metaclip2']:
+            metaclip2_vector = self.get_metaclip2_text_embedding(text_query).tolist()
+            tasks.append(self._search_milvus_async(settings.METACLIP2_COLLECTION, metaclip2_vector,
+                                                   initial_k, None, user_query, 'metaclip2'))
         if mode == 'beit3':
-            beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
-            tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector,
-                                                   top_k, None, user_query, 'beit3'))
+            if self.beit3_model is None or self.beit3_sp_model is None:
+                logger.warning("BEiT-3 model is unavailable. Falling back to MetaCLIP 2 vector search.")
+                metaclip2_vector = self.get_metaclip2_text_embedding(text_query).tolist()
+                tasks.append(self._search_milvus_async(settings.METACLIP2_COLLECTION, metaclip2_vector,
+                                                       initial_k, None, user_query, 'metaclip2'))
+            else:
+                beit3_vector = self.get_beit3_text_embedding(text_query).tolist()
+                tasks.append(self._search_milvus_async(settings.BEIT3_COLLECTION, beit3_vector,
+                                                       initial_k, None, user_query, 'beit3'))
 
         search_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1038,7 +1638,7 @@ Câu query gốc là: "{original_query}"
             if isinstance(result, Exception):
                 logger.error(f"Search task {i} failed: {result}")
                 continue
-            search_type = 'clip' if (mode in ['hybrid', 'clip'] and i == 0) else 'beit3'
+            search_type = 'metaclip2' if (mode in ['hybrid', 'metaclip2'] and i == 0) else 'beit3'
             self._process_search_results(result, candidate_info, search_type)
 
         # BƯỚC 2, 3, 4: TINH CHỈNH, LỌC VÀ TĂNG ĐIỂM
@@ -1059,58 +1659,230 @@ Câu query gốc là: "{original_query}"
         # Trả về kết quả đã format
         sorted_results = sorted(candidate_info.items(), key=lambda item: item[1]['score'], reverse=True)
         return self._format_results(sorted_results[:top_k])
+    
 
-    def _aggregate_multi_query_results(self, all_candidates: Dict[str, Dict], top_k: int) -> List[Dict[str, Any]]:
+    def _aggregate_multi_query_results(
+        self,
+        all_candidates: Dict[str, Dict],
+        top_k: int,
+        num_queries: int,
+    ) -> List[Dict[str, Any]]:
         """
-        Tổng hợp kết quả từ nhiều query và tính điểm trung bình.
+        Aggregate multi-query retrieval results.
+
+        Formula:
+
+            final_score =
+                0.5 * original_score
+            + 0.3 * expanded_score
+            + 0.2 * coverage
+
+        Where:
+            original_score = score from original query Q0
+            expanded_score = average score from generated queries Q1...Qn
+            coverage       = matched_queries / total_queries
         """
+
         final_candidates = {}
-        
+
+        ORIGINAL_WEIGHT = 0.5
+        EXPANDED_WEIGHT = 0.3
+        COVERAGE_WEIGHT = 0.2
+
         for kf_id, data in all_candidates.items():
-            scores = data['scores']
-            if not scores:
+
+            query_scores = data.get("query_scores", {})
+
+            if not query_scores:
                 continue
-                
-            # Tính điểm trung bình và các thống kê
-            avg_score = statistics.mean(scores)
-            max_score = max(scores)
-            min_score = min(scores)
-            score_std = statistics.stdev(scores) if len(scores) > 1 else 0
-            
-            # Điểm cuối cùng: trung bình có trọng số với độ ổn định
-            stability_bonus = 1.0 - (score_std / max(avg_score, 0.1))  # Thưởng cho kết quả ổn định
-            final_score = avg_score * (1.0 + 0.1 * stability_bonus)
-            
+
+            # =====================================================
+            # 1. Original query score
+            # =====================================================
+
+            original_score = query_scores.get(0, 0.0)
+
+            # =====================================================
+            # 2. Expanded query score
+            # =====================================================
+
+            expanded_scores = [
+                score
+                for query_idx, score in query_scores.items()
+                if query_idx != 0
+            ]
+
+            if expanded_scores:
+                expanded_score = statistics.mean(expanded_scores)
+            else:
+                expanded_score = 0.0
+
+            # =====================================================
+            # 3. Query coverage
+            # =====================================================
+
+            matched_queries = len(query_scores)
+
+            coverage = matched_queries / max(num_queries, 1)
+
+            # =====================================================
+            # 4. Final multi-query score
+            # =====================================================
+
+            final_score = (
+                ORIGINAL_WEIGHT * original_score
+                + EXPANDED_WEIGHT * expanded_score
+                + COVERAGE_WEIGHT * coverage
+            )
+
+            # =====================================================
+            # 5. Statistics
+            # =====================================================
+
+            all_scores = list(query_scores.values())
+
+            avg_score = (
+                statistics.mean(all_scores)
+                if all_scores
+                else 0.0
+            )
+
+            max_score = (
+                max(all_scores)
+                if all_scores
+                else 0.0
+            )
+
+            min_score = (
+                min(all_scores)
+                if all_scores
+                else 0.0
+            )
+
+            # =====================================================
+            # 6. Result
+            # =====================================================
+
             final_candidates[kf_id] = {
-                'keyframe_id': kf_id,
-                'video_id': data['video_id'],
-                'timestamp': data['timestamp'],
-                'score': final_score,
-                'reasons': [
-                    f"Multi-query average: {avg_score:.3f} (from {len(scores)} queries)",
-                    f"Score range: {min_score:.3f} - {max_score:.3f}",
-                    f"Stability bonus: {stability_bonus:.3f}"
-                ] + data['all_reasons'][:5],  # Giới hạn số lý do hiển thị
-                'metadata': {
-                    **data['metadata'],
-                    'query_count': len(scores),
-                    'avg_score': round(avg_score, 4),
-                    'max_score': round(max_score, 4),
-                    'min_score': round(min_score, 4),
-                    'score_std': round(score_std, 4)
+                "keyframe_id": kf_id,
+                "video_id": data["video_id"],
+                "timestamp": data["timestamp"],
+
+                "score": final_score,
+
+                "reasons": [
+                    f"Original query score: {original_score:.3f}",
+                    f"Expanded query score: {expanded_score:.3f}",
+                    f"Query coverage: {matched_queries}/{num_queries}",
+                    f"Final multi-query score: {final_score:.3f}",
+                ] + data.get("all_reasons", [])[:5],
+
+                "metadata": {
+                    **data.get("metadata", {}),
+
+                    "query_count": matched_queries,
+
+                    "query_coverage": round(
+                        coverage,
+                        4
+                    ),
+
+                    "original_score": round(
+                        original_score,
+                        4
+                    ),
+
+                    "expanded_score": round(
+                        expanded_score,
+                        4
+                    ),
+
+                    "avg_score": round(
+                        avg_score,
+                        4
+                    ),
+
+                    "max_score": round(
+                        max_score,
+                        4
+                    ),
+
+                    "min_score": round(
+                        min_score,
+                        4
+                    ),
+
+                    "query_scores": {
+                        str(k): round(v, 4)
+                        for k, v in query_scores.items()
+                    },
                 }
             }
-        
-        # Sắp xếp và trả về top_k
-        sorted_results = sorted(final_candidates.values(), key=lambda x: x['score'], reverse=True)
+
+        # =========================================================
+        # 7. Sort by final score
+        # =========================================================
+
+        sorted_results = sorted(
+            final_candidates.values(),
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
         return sorted_results[:top_k]
+
+    
+    # def _aggregate_multi_query_results(self, all_candidates: Dict[str, Dict], top_k: int) -> List[Dict[str, Any]]:
+    #     """
+    #     Tổng hợp kết quả từ nhiều query và tính điểm trung bình.
+    #     """
+    #     final_candidates = {}
+        
+    #     for kf_id, data in all_candidates.items():
+    #         scores = data['scores']
+    #         if not scores:
+    #             continue
+                
+    #         # Tính điểm trung bình và các thống kê
+    #         avg_score = statistics.mean(scores)
+    #         max_score = max(scores)
+    #         min_score = min(scores)
+    #         score_std = statistics.stdev(scores) if len(scores) > 1 else 0
+            
+    #         # Điểm cuối cùng: trung bình có trọng số với độ ổn định
+    #         stability_bonus = 1.0 - (score_std / max(avg_score, 0.1))  # Thưởng cho kết quả ổn định
+    #         final_score = avg_score * (1.0 + 0.1 * stability_bonus)
+            
+    #         final_candidates[kf_id] = {
+    #             'keyframe_id': kf_id,
+    #             'video_id': data['video_id'],
+    #             'timestamp': data['timestamp'],
+    #             'score': final_score,
+    #             'reasons': [
+    #                 f"Multi-query average: {avg_score:.3f} (from {len(scores)} queries)",
+    #                 f"Score range: {min_score:.3f} - {max_score:.3f}",
+    #                 f"Stability bonus: {stability_bonus:.3f}"
+    #             ] + data['all_reasons'][:5],  # Giới hạn số lý do hiển thị
+    #             'metadata': {
+    #                 **data['metadata'],
+    #                 'query_count': len(scores),
+    #                 'avg_score': round(avg_score, 4),
+    #                 'max_score': round(max_score, 4),
+    #                 'min_score': round(min_score, 4),
+    #                 'score_std': round(score_std, 4)
+    #             }
+    #         }
+        
+    #     # Sắp xếp và trả về top_k
+    #     sorted_results = sorted(final_candidates.values(), key=lambda x: x['score'], reverse=True)
+    #     return sorted_results[:top_k]
 
     def _format_results(self, sorted_candidates: List[Tuple[str, Dict]]) -> List[Dict]:
         return [{
             "keyframe_id": kf_id, "video_id": self._parse_video_id_from_kf(kf_id)[0],
             "timestamp": info.get('timestamp', 0.0), "score": round(info.get('score', 0.0), 4),
             "reasons": info.get('reasons', []),
-            "metadata": {"rank": rank + 1, "clip_score": round(info.get('clip_score', 0.0), 4), "beit3_score": round(info.get('beit3_score', 0.0), 4)}
+            "metadata": {"rank": rank + 1, "metaclip2_score": round(info.get('metaclip2_score', 0.0), 4), "beit3_score": round(info.get('beit3_score', 0.0), 4)}
         } for rank, (kf_id, info) in enumerate(sorted_candidates)]
 
 # --- END OF FILE app/retrieval_engine.py ---

@@ -35,7 +35,7 @@ ObjectConstraintSpec = Union[
 # --- Enums for controlled vocabularies ---
 class SearchMode(str, Enum):
     HYBRID = "hybrid"
-    CLIP = "clip"
+    METACLIP2 = "metaclip2"
     BEIT3 = "beit3"
 
 
@@ -80,7 +80,7 @@ class SearchRequest(BaseModel):
 # --- API Response Models ---
 class SearchResultMetadata(BaseModel):
     rank: int = Field(..., description="Thứ hạng của kết quả.")
-    clip_score: Optional[float] = Field(default=None, description="Điểm tương đồng từ mô hình CLIP (nếu có).")
+    metaclip2_score: Optional[float] = Field(default=None, description="Điểm tương đồng từ mô hình MetaCLIP 2 (nếu có).")
     beit3_score: Optional[float] = Field(default=None, description="Điểm tương đồng từ mô hình BEiT-3 (nếu có).")
 
 
@@ -274,7 +274,7 @@ search_examples = {
 compare_examples = {
     "default": {
         "summary": "So sánh các chế độ tìm kiếm",
-        "description": "So sánh hiệu quả giữa các chế độ `hybrid`, `clip`, và `beit3` trên cùng một truy vấn.",
+        "description": "So sánh hiệu quả giữa các chế độ `hybrid`, `metaclip2`, và `beit3` trên cùng một truy vấn.",
         "value": {"text_query": "a news anchor in a studio", "top_k": 5},
     }
 }

@@ -2,7 +2,7 @@
 
 import os
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import Optional
 import logging
 import torch
@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     """
 
     # --- Milvus Configuration ---
+    # Set MILVUS_URI and MILVUS_TOKEN for the new Zilliz Cloud database.
+    # Host/port remain available for local or self-hosted Milvus deployments.
+    MILVUS_URI: Optional[str] = None
+    MILVUS_TOKEN: Optional[str] = None
     MILVUS_HOST: str = "0.tcp.ap.ngrok.io"
     MILVUS_PORT: int = 11421
     MILVUS_ALIAS: str = "default"
@@ -34,13 +38,9 @@ class Settings(BaseSettings):
     ELASTICSEARCH_VERIFY_CERTS: bool = False  # Thêm option này
 
     # --- Milvus Collection Names ---
-    #CLIP_COLLECTION: str = 'arch_clip_image_v100'
-    #BEIT3_COLLECTION: str = 'arch_beit3_image_v100'
-    #OBJECT_COLLECTION: str = 'arch_object_name_v100'
-    #
-    CLIP_COLLECTION: str = 'arch_clip_image_v404'
-    BEIT3_COLLECTION: str = 'arch_beit3_image_v404'
-    OBJECT_COLLECTION: str = 'arch_object_name_v404'
+    METACLIP2_COLLECTION: str = "arch_metaclip2_image_v100"
+    BEIT3_COLLECTION: str = "arch_beit3_large_itc_image_v100"
+    OBJECT_COLLECTION: str = "arch_metaclip2_object_name_v100"
 
     # --- Elasticsearch Index Names ---
     METADATA_INDEX: str = 'video_retrieval_metadata_v3'
@@ -48,9 +48,11 @@ class Settings(BaseSettings):
     ASR_INDEX: str = 'video_transcripts_v100'
 
     # --- Model Paths ---
-    CLIP_MODEL_PATH: str = os.environ.get("CLIP_MODEL_PATH", "/app/models/clip_model.bin")
-    BEIT3_MODEL_PATH: str = os.environ.get("BEIT3_MODEL_PATH", "/app/models/beit3_base_patch16_384_coco_retrieval.pth")
-    BEIT3_SPM_PATH: str = os.environ.get("BEIT3_SPM_PATH", "/app/models/beit3.spm")
+    METACLIP2_MODEL_NAME: str = "facebook/metaclip-2-worldwide-huge-quickgelu"
+    METACLIP2_DIM: int = 1024
+    HF_CACHE_DIR: Optional[str] = None
+    BEIT3_MODEL_PATH: str = "models/beit3_large_itc_patch16_224.pth"
+    BEIT3_SPM_PATH: str = "models/beit3.spm"
 
     # --- Model & Processing Configuration ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -77,10 +79,30 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     ENVIRONMENT: str = "development"
     # --- Gemini API Configuration ---
-    GOOGLE_API_KEY: Optional[str] = Field(
-        default=None, 
-        description="Google API key for Gemini multi-query generation"
+    GEMINI_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key for query expansion and YOLOE class extraction"
     )
+    GOOGLE_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Backward-compatible alias for Gemini key"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_gemini_keys(cls, values):
+        if not isinstance(values, dict):
+            return values
+
+        gemini_key = values.get("GEMINI_API_KEY")
+        google_key = values.get("GOOGLE_API_KEY")
+
+        if not gemini_key and google_key:
+            values["GEMINI_API_KEY"] = google_key
+        if not google_key and gemini_key:
+            values["GOOGLE_API_KEY"] = gemini_key
+
+        return values
 
     class Config:
         env_file = ".env"
@@ -89,16 +111,16 @@ class Settings(BaseSettings):
     # --- Connection Helper Methods ---
     def get_milvus_connection_params(self) -> dict:
         """Trả về dictionary chứa các tham số kết nối Milvus."""
+        if self.MILVUS_URI:
+            if not self.MILVUS_TOKEN:
+                raise ValueError("MILVUS_TOKEN is required when MILVUS_URI is configured.")
+            return {"uri": self.MILVUS_URI, "token": self.MILVUS_TOKEN, "alias": self.MILVUS_ALIAS}
+
         params = {
             "host": self.MILVUS_HOST,
             "port": self.MILVUS_PORT,
             "alias": self.MILVUS_ALIAS
         }
-        # params = {
-        #     "uri": "https://in05-8f8ff453c20db17.serverless.gcp-us-west1.cloud.zilliz.com",
-        #     "token": "2a79bf3c87e4db3cada8649a5c575642e355737c9ce0a956e94c26163248c5e5dd608b46982039760ca66ecbbdcca6610eb37b68",
-        #     "alias": self.MILVUS_ALIAS
-        # }
 
         # Chỉ thêm user/password nếu được cấu hình
         if self.MILVUS_USER:
@@ -127,6 +149,11 @@ class Settings(BaseSettings):
     # --- Validation Methods ---
     def check_milvus_config(self) -> bool:
         """Kiểm tra cấu hình Milvus."""
+        if self.MILVUS_URI:
+            if not self.MILVUS_TOKEN:
+                logger.error("MILVUS_TOKEN is required with MILVUS_URI.")
+                return False
+            return True
         if not self.MILVUS_HOST or not self.MILVUS_PORT:
             logger.error("Milvus host or port is not configured.")
             return False
@@ -146,7 +173,6 @@ class Settings(BaseSettings):
     def check_model_paths(self) -> bool:
         """Kiểm tra sự tồn tại của các file model."""
         paths_to_check = [
-            self.CLIP_MODEL_PATH,
             self.BEIT3_MODEL_PATH,
             self.BEIT3_SPM_PATH,
         ]

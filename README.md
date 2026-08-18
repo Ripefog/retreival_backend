@@ -102,32 +102,50 @@ DEVICE=cuda  # hoặc cpu
 
 ## 🚀 Chạy ứng dụng
 
-### Development mode
+### 🟢 Bước 1: Khởi chạy Backend Server
+
+Mở terminal và chạy các lệnh sau:
 
 ```bash
-cd app
-python main.py
+cd /home/s12gbn3/workspace/retreival_backend
+source /home/s12gbn3/pytorchenv/bin/activate
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Production mode
+Backend sẽ tự động nạp cấu hình Zilliz Cloud Milvus từ file `.env` và lắng nghe tại: `http://localhost:8000`.
+
+---
+
+### 🌐 Bước 2: (Tùy chọn) Mở ra Internet cho Frontend kết nối
+
+Nếu Frontend nằm ở máy khác / Cloud / Vercel, bạn mở thêm 1 tab terminal khác và chạy:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Terminal sẽ tạo ra 1 đường dẫn HTTPS công khai dạng: `https://xxx-xxx-xxx.trycloudflare.com` để Frontend kết nối vào.
+
+---
+
+### 🛠️ Các lệnh thay thế khác
+
+#### Production mode
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-### Docker (tùy chọn)
+#### Docker (tùy chọn)
 
 ```bash
-# Build base image (lâu, chỉ 1 lần)
+# Build base image (chỉ 1 lần)
 docker build -t video-retrieval-backend-base --target base .
 
-# Build runtime image (nhanh, mỗi lần sửa code)
+# Build runtime image
 docker build -t video-retrieval-backend --target runtime .
 
-docker build -t video-retrieval-backend .
 docker run --gpus all -p 8000:8000 video-retrieval-backend
-docker run --gpus all -p 8000:8000 -v ${PWD}:/app video-retrieval-backend
-
 ```
 
 ## 📡 API Endpoints

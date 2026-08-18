@@ -16,6 +16,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image
+
+from .groudingDINO import GroundingDINO
+from .YOLOE26 import YOLOE26LReranker
 
 from .config import settings
 from .database import init_database, close_database
@@ -34,6 +38,19 @@ from .models import (
 from .temporal_search import TemporalSearchEngine
 from typing import List, Dict, Any, Optional, Tuple, Set
 
+
+# schema 
+from .schemas.reranking import (
+    RerankingSearchRequest,
+    RerankingSearchResponse,
+    RerankingImage,
+    GroundingDetection,
+    GroundingResult,
+)
+
+from .services.keyframe_repository import keyframe_repository
+
+
 # Cấu hình logging cơ bản cho ứng dụng
 logging.basicConfig(
     level=logging.INFO,
@@ -46,8 +63,10 @@ from typing import Optional
 
 retriever: Optional[HybridRetriever] = None
 
-# Add global temporal engine variable
+# Add global temporal engine variables
 temporal_engine: Optional[TemporalSearchEngine] = None
+grounding_reranker: Optional[GroundingDINO] = None
+yoloe_reranker: Optional[YOLOE26LReranker] = None
 
 
 @asynccontextmanager
@@ -55,7 +74,7 @@ async def lifespan(app: FastAPI):
     """
     Quản lý vòng đời của ứng dụng: khởi tạo tài nguyên khi bắt đầu và giải phóng khi kết thúc.
     """
-    global retriever, temporal_engine
+    global retriever, temporal_engine, grounding_reranker, yoloe_reranker
     logger.info("--- Application Startup ---")
 
     # 1. Kết nối cơ sở dữ liệu
@@ -67,6 +86,17 @@ async def lifespan(app: FastAPI):
 
     # 3. Khởi tạo temporal search engine
     temporal_engine = TemporalSearchEngine(retriever)
+
+    # 4. Khởi tạo GroundingDINO reranker
+    #grounding_reranker = GroundingDINO()
+
+    # 5. Khởi tạo YOLOE-26L reranker cho query-driven class extraction
+    try:
+        yoloe_reranker = YOLOE26LReranker(device=settings.DEVICE)
+        logger.info("✅ YOLOE-26L reranker initialized for natural language query parsing.")
+    except Exception as exc:
+        logger.warning(f"YOLOE-26L reranker initialization failed: {exc}")
+        yoloe_reranker = None
 
     logger.info("✅ Application startup complete. Ready to accept requests.")
 
@@ -81,7 +111,7 @@ async def lifespan(app: FastAPI):
 # Khởi tạo ứng dụng FastAPI với lifespan
 app = FastAPI(
     title="Hybrid Video Retrieval API",
-    description="Một API mạnh mẽ để tìm kiếm video đa phương thức, sử dụng kết hợp các mô hình AI (CLIP, BEiT-3, Co-DETR) và cơ sở dữ liệu vector/text (Milvus, Elasticsearch).",
+    description="Một API mạnh mẽ để tìm kiếm video đa phương thức, sử dụng MetaCLIP 2, BEiT-3, Co-DETR và cơ sở dữ liệu vector/text (Milvus, Elasticsearch).",
     version="1.1.0",
     lifespan=lifespan,
     contact={
@@ -118,10 +148,7 @@ async def health_check():
     milvus_status = retriever.check_milvus_connection()
     es_status = retriever.check_elasticsearch_connection()
 
-    is_healthy = (
-            milvus_status.get("status") == "connected" and
-            es_status.get("status") == "connected"
-    )
+    is_healthy = milvus_status.get("status") == "connected"
 
     if not is_healthy:
         raise HTTPException(
@@ -194,16 +221,17 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 @app.post("/search/compare", tags=["Search"])
 async def compare_search_modes(request: SearchRequest = Body(..., examples=compare_examples)):
     """
-    **So sánh kết quả giữa các chế độ tìm kiếm (`hybrid`, `clip`, `beit3`)** trên cùng một truy vấn.
+    **So sánh kết quả giữa các chế độ tìm kiếm (`hybrid`, `metaclip2`, `beit3`)** trên cùng một truy vấn.
 
     Rất hữu ích cho việc đánh giá và gỡ lỗi.
     """
     if not retriever: raise HTTPException(status_code=503, detail="Retriever not initialized")
     comparison_results = {}
-    modes_to_compare = ["hybrid", "clip", "beit3"]
+    modes_to_compare = ["hybrid", "metaclip2", "beit3"]
     for mode in modes_to_compare:
-        results = retriever.search(
-            text_query=request.text_query, mode=mode, object_filters=request.object_filters,
+        results = await retriever.search(
+            text_query=request.text_query, mode=mode, user_query=request.user_query,
+            object_filters=request.object_filters,
             color_filters=request.color_filters, ocr_query=request.ocr_query,
             asr_query=request.asr_query, top_k=request.top_k
         )
@@ -267,6 +295,334 @@ async def temporal_search(request: TemporalSearchRequest = Body(..., examples=te
         logger.error(f"Temporal search failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred during temporal search")
 
+
+
+@app.post(
+    "/search/rerank",
+    response_model=RerankingSearchResponse,
+    tags=["Reranking"],
+)
+async def rerank_search(
+    request: RerankingSearchRequest,
+):
+    if not yoloe_reranker:
+        raise HTTPException(
+            status_code=503,
+            detail="YOLOE-26L reranker is not initialized",
+        )
+
+    try:
+        query_classes = []
+        if hasattr(request, "classes") and request.classes:
+            query_classes = request.classes
+        else:
+            query_classes = yoloe_reranker.extract_classes_from_query(request.query)
+
+        logger.info(
+            f"Received YOLOE reranking request "
+            f"query='{request.query}' "
+            f"classes={query_classes} "
+            f"top_k={request.top_k} "
+            f"frames={len(request.frames)}"
+        )
+
+        if not query_classes:
+            raise HTTPException(
+                status_code=400,
+                detail="YOLOE classes cannot be empty",
+            )
+
+        items: list[dict[str, Any]] = []
+
+        for frame in request.frames:
+
+            # --------------------------------------------------
+            # 1. Convert keyframe_id -> local image path
+            # --------------------------------------------------
+
+            try:
+                image_path = (
+                    keyframe_repository.get_image_path(
+                        frame.keyframe_id
+                    )
+                )
+
+            except (
+                ValueError,
+                FileNotFoundError,
+            ) as e:
+
+                logger.error(
+                    f"Failed to resolve keyframe "
+                    f"'{frame.keyframe_id}': {e}"
+                )
+
+                raise HTTPException(
+                    status_code=404,
+                    detail=str(e),
+                )
+
+            # --------------------------------------------------
+            # 2. Load image
+            # --------------------------------------------------
+
+            try:
+                pil_image = (
+                    Image.open(
+                        image_path
+                    ).convert("RGB")
+                )
+
+            except Exception as e:
+
+                logger.error(
+                    f"Failed to open image "
+                    f"'{image_path}': {e}"
+                )
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Unable to read keyframe "
+                        f"'{frame.keyframe_id}'"
+                    ),
+                )
+
+            # --------------------------------------------------
+            # 3. Prepare YOLOE input
+            # --------------------------------------------------
+
+            items.append(
+                {
+                    "keyframe_id": (
+                        frame.keyframe_id
+                    ),
+                    "image": pil_image,
+                    "retrieval_score": (
+                        frame.retrieval_score
+                    ),
+                }
+            )
+
+        # ------------------------------------------------------
+        # 4. YOLOE-26L reranking
+        # ------------------------------------------------------
+
+        # query_classes = [
+        #     "person",
+        #     "motorcycle",
+        #     "helmet",
+        #     "construction barrier",
+        #     "construction debris",
+        # ]
+
+
+        yoloe_results = (
+            yoloe_reranker.rerank(
+                query_classes=query_classes,
+                images=items,
+                top_k=request.top_k,
+            )
+        )
+
+        # ------------------------------------------------------
+        # 5. Convert internal result -> API response
+        # ------------------------------------------------------
+
+        results: list[
+            GroundingResult
+        ] = []
+
+        for result in yoloe_results:
+
+            results.append(
+                GroundingResult(
+                    keyframe_id=(
+                        result.keyframe_id
+                    ),
+                    grounding_score=(
+                        result.grounding_score
+                    ),
+                    retrieval_score=(
+                        result.retrieval_score
+                    ),
+                    final_score=(
+                        result.final_score
+                    ),
+                    detections=[
+                        GroundingDetection(
+                            label=det.label,
+                            score=det.score,
+                            bbox=det.bbox,
+                        )
+                        for det in result.detections
+                    ],
+                )
+            )
+
+        # ------------------------------------------------------
+        # 6. Return response
+        # ------------------------------------------------------
+
+        return RerankingSearchResponse(
+            query=request.query,
+            total_candidates=len(
+                request.frames
+            ),
+            returned_results=len(
+                results
+            ),
+            results=results,
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logger.error(
+            f"YOLOE reranking search failed: {e}",
+            exc_info=True,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "An internal error occurred "
+                "during YOLOE reranking search."
+            ),
+        )
+
+# @app.post(
+#     "/search/rerank",
+#     response_model=RerankingSearchResponse,
+#     tags=["Reranking"],
+# )
+# async def rerank_search(
+#     request: RerankingSearchRequest,
+# ):
+#     if not grounding_reranker:
+#         raise HTTPException(
+#             status_code=503,
+#             detail="Grounding DINO reranker is not initialized",
+#         )
+
+#     try:
+#         logger.info(
+#             f"Received reranking request "
+#             f"query='{request.query}' "
+#             f"top_k={request.top_k} "
+#             f"frames={len(request.frames)}"
+#         )
+
+#         items: list[dict[str, Any]] = []
+
+#         for frame in request.frames:
+
+#             # --------------------------------------------------
+#             # 1. Convert keyframe_id -> local image path
+#             # --------------------------------------------------
+#             try:
+#                 image_path = keyframe_repository.get_image_path(
+#                     frame.keyframe_id
+#                 )
+#             except (ValueError, FileNotFoundError) as e:
+#                 logger.error(
+#                     f"Failed to resolve keyframe "
+#                     f"'{frame.keyframe_id}': {e}"
+#                 )
+
+#                 raise HTTPException(
+#                     status_code=404,
+#                     detail=str(e),
+#                 )
+
+#             # --------------------------------------------------
+#             # 2. Load image
+#             # --------------------------------------------------
+#             try:
+#                 pil_image = Image.open(image_path).convert("RGB")
+#             except Exception as e:
+#                 logger.error(
+#                     f"Failed to open image "
+#                     f"'{image_path}': {e}"
+#                 )
+
+#                 raise HTTPException(
+#                     status_code=400,
+#                     detail=(
+#                         f"Unable to read keyframe "
+#                         f"'{frame.keyframe_id}'"
+#                     ),
+#                 )
+
+#             # --------------------------------------------------
+#             # 3. Prepare input for GroundingDINO
+#             # --------------------------------------------------
+#             items.append(
+#                 {
+#                     "keyframe_id": frame.keyframe_id,
+#                     "image": pil_image,
+#                     "retrieval_score": frame.retrieval_score,
+#                 }
+#             )
+
+#         # ------------------------------------------------------
+#         # 4. GroundingDINO reranking
+#         # ------------------------------------------------------
+#         grounding_results = grounding_reranker.rerank(
+#             query=request.query,
+#             images=items,
+#             top_k=request.top_k,
+#         )
+
+#         # ------------------------------------------------------
+#         # 5. Convert internal result -> API response
+#         # ------------------------------------------------------
+#         results: list[GroundingResult] = []
+
+#         for result in grounding_results:
+
+#             results.append(
+#                 GroundingResult(
+#                     keyframe_id=result.keyframe_id,
+#                     grounding_score=result.grounding_score,
+#                     retrieval_score=result.retrieval_score,
+#                     final_score=result.final_score,
+#                     detections=[
+#                         GroundingDetection(
+#                             label=det.label,
+#                             score=det.score,
+#                             bbox=det.bbox,
+#                         )
+#                         for det in result.detections
+#                     ],
+#                 )
+#             )
+
+#         # ------------------------------------------------------
+#         # 6. Return response
+#         # ------------------------------------------------------
+#         return RerankingSearchResponse(
+#             query=request.query,
+#             total_candidates=len(request.frames),
+#             returned_results=len(results),
+#             results=results,
+#         )
+
+#     except HTTPException:
+#         raise
+
+#     except Exception as e:
+#         logger.error(
+#             f"Reranking search failed: {e}",
+#             exc_info=True,
+#         )
+
+#         raise HTTPException(
+#             status_code=500,
+#             detail="An internal error occurred during reranking search.",
+#         )
 
 if __name__ == "__main__":
     # Chạy server Uvicorn khi thực thi file này trực tiếp
